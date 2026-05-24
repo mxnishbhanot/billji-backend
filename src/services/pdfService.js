@@ -1,0 +1,126 @@
+import PDFDocument from 'pdfkit';
+
+const currency = (value) => `Rs. ${Number(value || 0).toFixed(2)}`;
+
+const logoBufferFromDataUrl = (logoUrl = '') => {
+  const match = /^data:image\/(?:png|jpe?g);base64,(.+)$/i.exec(logoUrl);
+
+  if (!match) {
+    return null;
+  }
+
+  try {
+    return Buffer.from(match[1], 'base64');
+  } catch {
+    return null;
+  }
+};
+
+const drawBusinessLogo = (doc, logoUrl) => {
+  const logo = logoBufferFromDataUrl(logoUrl);
+
+  if (!logo) {
+    return false;
+  }
+
+  try {
+    doc.image(logo, 48, 48, { fit: [52, 52] });
+    doc.roundedRect(48, 48, 52, 52, 12).stroke('#e5e7eb');
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const generateInvoicePdf = (invoice, user) =>
+  new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 48, size: 'A4' });
+    const chunks = [];
+    const business = user.businessProfile || {};
+
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const hasLogo = drawBusinessLogo(doc, business.logoUrl);
+    const businessX = hasLogo ? 116 : 48;
+    const businessWidth = hasLogo ? 250 : 320;
+
+    doc.fillColor('#111827').fontSize(22).font('Helvetica-Bold').text(business.businessName || 'QuickInvoice Business', businessX, 48, {
+      width: businessWidth
+    });
+    doc.fontSize(9).font('Helvetica').fillColor('#64748b').text(business.address || 'Business address not set', businessX, 78, {
+      width: businessWidth
+    });
+    doc.text(`${business.phone || ''}${business.email ? ` | ${business.email}` : ''}`, businessX, 104, { width: businessWidth });
+    if (business.gstNumber) {
+      doc.text(`GST: ${business.gstNumber}`, businessX, 118, { width: businessWidth });
+    }
+
+    doc.fillColor('#111827').fontSize(26).font('Helvetica-Bold').text('INVOICE', 410, 48, { align: 'right' });
+    doc.fontSize(10).font('Helvetica').text(`# ${invoice.invoiceNumber}`, 410, 82, { align: 'right' });
+    doc.text(`Date: ${new Date(invoice.date).toLocaleDateString()}`, 410, 98, { align: 'right' });
+    doc.text(`Status: ${invoice.status.toUpperCase()}`, 410, 114, { align: 'right' });
+
+    doc.moveDown(3);
+    doc.roundedRect(48, 150, 500, 90, 10).stroke('#e5e7eb');
+    doc.fontSize(11).font('Helvetica-Bold').text('Bill To', 68, 170);
+    doc.fontSize(12).font('Helvetica-Bold').text(invoice.customerSnapshot.name, 68, 190);
+    doc.fontSize(9).font('Helvetica').fillColor('#64748b').text(invoice.customerSnapshot.phone, 68, 208);
+    if (invoice.customerSnapshot.email) {
+      doc.text(invoice.customerSnapshot.email, 68, 222);
+    }
+    if (invoice.customerSnapshot.address) {
+      doc.text(invoice.customerSnapshot.address, 300, 190, { width: 220 });
+    }
+
+    const tableTop = 280;
+    doc.fillColor('#0f172a').roundedRect(48, tableTop, 500, 30, 8).fill();
+    doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold');
+    doc.text('Item', 64, tableTop + 10);
+    doc.text('Qty', 310, tableTop + 10, { width: 40, align: 'right' });
+    doc.text('Rate', 370, tableTop + 10, { width: 70, align: 'right' });
+    doc.text('Total', 460, tableTop + 10, { width: 70, align: 'right' });
+
+    let y = tableTop + 44;
+    invoice.items.forEach((item) => {
+      if (y > 680) {
+        doc.addPage();
+        y = 60;
+      }
+
+      doc.fillColor('#111827').fontSize(10).font('Helvetica-Bold').text(item.name, 64, y, { width: 210 });
+      if (item.sku) {
+        doc.fillColor('#64748b').fontSize(8).font('Helvetica').text(`SKU: ${item.sku}`, 64, y + 14);
+      }
+      doc.fillColor('#111827').fontSize(10).font('Helvetica');
+      doc.text(String(item.quantity), 310, y, { width: 40, align: 'right' });
+      doc.text(currency(item.price), 370, y, { width: 70, align: 'right' });
+      doc.text(currency(item.total), 460, y, { width: 70, align: 'right' });
+      doc.moveTo(64, y + 28).lineTo(530, y + 28).stroke('#eef2f7');
+      y += 40;
+    });
+
+    const totalsX = 340;
+    y += 16;
+    doc.fillColor('#111827').fontSize(10).font('Helvetica');
+    doc.text('Subtotal', totalsX, y, { width: 90 });
+    doc.text(currency(invoice.subtotal), 460, y, { width: 70, align: 'right' });
+    y += 18;
+    doc.text('Discount', totalsX, y, { width: 90 });
+    doc.text(`-${currency(invoice.discount.amount)}`, 460, y, { width: 70, align: 'right' });
+    y += 18;
+    doc.text(`Tax (${invoice.tax.rate}%)`, totalsX, y, { width: 90 });
+    doc.text(currency(invoice.tax.amount), 460, y, { width: 70, align: 'right' });
+    y += 26;
+    doc.roundedRect(330, y - 8, 218, 36, 8).fill('#f8fafc').stroke('#e5e7eb');
+    doc.fillColor('#111827').fontSize(13).font('Helvetica-Bold').text('Grand Total', totalsX, y);
+    doc.text(currency(invoice.total), 440, y, { width: 90, align: 'right' });
+
+    if (invoice.notes) {
+      doc.fillColor('#64748b').fontSize(9).font('Helvetica').text(`Notes: ${invoice.notes}`, 48, 740, { width: 500 });
+    }
+
+    doc.fillColor('#94a3b8').fontSize(8).text('Generated by QuickInvoice', 48, 782, { align: 'center' });
+    doc.end();
+  });
