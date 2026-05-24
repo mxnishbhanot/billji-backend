@@ -3,7 +3,7 @@ import { createTransporter } from '../config/mailer.js';
 import { ApiError } from '../utils/ApiError.js';
 import { generateInvoicePdf } from './pdfService.js';
 
-export const sendInvoiceEmail = async ({ invoice, user, to }) => {
+export const sendInvoiceEmail = async ({ invoice, user, to, pdfUrl }) => {
   const recipient = to || invoice.customerSnapshot.email;
 
   if (!recipient) {
@@ -22,7 +22,7 @@ export const sendInvoiceEmail = async ({ invoice, user, to }) => {
     from: env.smtp.from,
     to: recipient,
     subject: `Invoice ${invoice.invoiceNumber} from ${user.businessProfile?.businessName || 'QuickInvoice'}`,
-    text: `Hello ${invoice.customerSnapshot.name}, your invoice is attached. You can also download it here: ${invoice.pdfUrl}`,
+    text: `Hello ${invoice.customerSnapshot.name}, your invoice is attached. You can also download it here: ${pdfUrl || invoice.pdfUrl}`,
     attachments: [
       {
         filename: `${invoice.invoiceNumber}.pdf`,

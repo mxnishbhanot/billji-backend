@@ -4,8 +4,11 @@ import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import {
   buildInvoicePayload,
+  buildInvoiceShareMessage,
+  buildPublicInvoicePdfUrl,
   buildWhatsAppLink,
   getInvoiceForUser,
+  serializeInvoice,
   setInvoicePdfUrl,
   stockAdjustmentsForInvoice
 } from '../services/invoiceService.js';
@@ -13,6 +16,16 @@ import { sendInvoiceEmail } from '../services/emailService.js';
 import { generateInvoicePdf } from '../services/pdfService.js';
 import { emitUserEvent } from '../services/socketService.js';
 import { paginateQuery, wantsPagination } from '../utils/pagination.js';
+
+const parseDateParam = (value) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }
+  return new Date(value);
+};
+const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+const endOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
 
 export const invoiceRules = [
   body('customerId').optional({ nullable: true }).isMongoId(),
@@ -50,8 +63,8 @@ export const listInvoices = asyncHandler(async (req, res) => {
 
   if (from || to) {
     filter.date = {};
-    if (from) filter.date.$gte = new Date(from);
-    if (to) filter.date.$lte = new Date(to);
+    if (from) filter.date.$gte = startOfDay(parseDateParam(from));
+    if (to) filter.date.$lte = endOfDay(parseDateParam(to));
   }
 
   if (search) {
@@ -66,11 +79,11 @@ export const listInvoices = asyncHandler(async (req, res) => {
 
   if (wantsPagination(req.query)) {
     const { items, pagination } = await paginateQuery(query, Invoice.countDocuments(filter), req.query);
-    return res.json({ success: true, invoices: items, pagination });
+    return res.json({ success: true, invoices: items.map((invoice) => serializeInvoice(invoice, req)), pagination });
   }
 
   const invoices = await query;
-  res.json({ success: true, invoices });
+  res.json({ success: true, invoices: invoices.map((invoice) => serializeInvoice(invoice, req)) });
 });
 
 const emitInvoiceChanges = (userId, reason, { stockChanged = false } = {}) => {
@@ -85,16 +98,16 @@ const emitInvoiceChanges = (userId, reason, { stockChanged = false } = {}) => {
 export const createInvoice = asyncHandler(async (req, res) => {
   const payload = await buildInvoicePayload(req.user, req.body);
   const invoice = await Invoice.create(payload);
-  await setInvoicePdfUrl(invoice);
+  await setInvoicePdfUrl(invoice, req);
   await stockAdjustmentsForInvoice(invoice, -1);
 
   emitInvoiceChanges(req.user._id, 'invoice_created', { stockChanged: true });
-  res.status(201).json({ success: true, invoice });
+  res.status(201).json({ success: true, invoice: serializeInvoice(invoice, req) });
 });
 
 export const getInvoice = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForUser(req.user._id, req.params.id);
-  res.json({ success: true, invoice });
+  res.json({ success: true, invoice: serializeInvoice(invoice, req) });
 });
 
 export const updateInvoiceStatus = asyncHandler(async (req, res) => {
@@ -109,7 +122,7 @@ export const updateInvoiceStatus = asyncHandler(async (req, res) => {
   await invoice.save();
 
   emitInvoiceChanges(req.user._id, 'invoice_status_updated');
-  res.json({ success: true, invoice });
+  res.json({ success: true, invoice: serializeInvoice(invoice, req) });
 });
 
 export const duplicateInvoice = asyncHandler(async (req, res) => {
@@ -131,11 +144,11 @@ export const duplicateInvoice = asyncHandler(async (req, res) => {
     notes: invoice.notes
   });
   const clone = await Invoice.create(payload);
-  await setInvoicePdfUrl(clone);
+  await setInvoicePdfUrl(clone, req);
   await stockAdjustmentsForInvoice(clone, -1);
 
   emitInvoiceChanges(req.user._id, 'invoice_duplicated', { stockChanged: true });
-  res.status(201).json({ success: true, invoice: clone });
+  res.status(201).json({ success: true, invoice: serializeInvoice(clone, req) });
 });
 
 export const deleteInvoice = asyncHandler(async (req, res) => {
@@ -174,14 +187,14 @@ export const whatsappInvoice = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForUser(req.user._id, req.params.id);
   res.json({
     success: true,
-    link: buildWhatsAppLink(invoice),
-    message: `Hello ${invoice.customerSnapshot.name}, your invoice is ready. Download here: ${invoice.pdfUrl}`
+    link: buildWhatsAppLink(invoice, req),
+    message: buildInvoiceShareMessage(invoice, req)
   });
 });
 
 export const emailInvoice = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForUser(req.user._id, req.params.id);
-  const result = await sendInvoiceEmail({ invoice, user: req.user, to: req.body.email });
+  const result = await sendInvoiceEmail({ invoice, user: req.user, to: req.body.email, pdfUrl: buildPublicInvoicePdfUrl(invoice, req) });
 
   res.json({ success: true, message: `Invoice sent to ${result.recipient}` });
 });

@@ -7,6 +7,35 @@ import { ApiError } from '../utils/ApiError.js';
 import { calculateInvoiceTotals } from '../utils/invoiceMath.js';
 import crypto from 'crypto';
 
+const LOCAL_PUBLIC_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1']);
+
+const trimTrailingSlash = (value) => value.replace(/\/+$/, '');
+
+const isLocalPublicUrl = (value) => {
+  try {
+    return LOCAL_PUBLIC_HOSTS.has(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+};
+
+const requestBaseUrl = (req) => {
+  const host = req?.get?.('host') || req?.headers?.host;
+  if (!host) return trimTrailingSlash(env.apiPublicUrl);
+  return `${req.protocol || 'http'}://${host}`;
+};
+
+export const buildPublicInvoicePdfUrl = (invoice, req) => {
+  const configuredBaseUrl = trimTrailingSlash(env.apiPublicUrl);
+  const baseUrl = isLocalPublicUrl(configuredBaseUrl) ? requestBaseUrl(req) : configuredBaseUrl;
+  return `${trimTrailingSlash(baseUrl)}/api/public/invoices/${invoice._id}/${invoice.shareToken}/pdf`;
+};
+
+export const serializeInvoice = (invoice, req) => ({
+  ...(invoice.toObject ? invoice.toObject() : invoice),
+  pdfUrl: buildPublicInvoicePdfUrl(invoice, req)
+});
+
 export const generateInvoiceNumber = async (user, date = new Date()) => {
   const prefix = user.businessProfile?.invoicePrefix || 'INV';
   const year = date.getFullYear();
@@ -149,8 +178,8 @@ export const buildInvoicePayload = async (user, payload) => {
   };
 };
 
-export const setInvoicePdfUrl = async (invoice) => {
-  invoice.pdfUrl = `${env.apiPublicUrl}/api/public/invoices/${invoice._id}/${invoice.shareToken}/pdf`;
+export const setInvoicePdfUrl = async (invoice, req) => {
+  invoice.pdfUrl = buildPublicInvoicePdfUrl(invoice, req);
   await invoice.save();
   return invoice;
 };
@@ -220,8 +249,11 @@ export const getInvoiceForUser = async (userId, invoiceId) => {
   return invoice;
 };
 
-export const buildWhatsAppLink = (invoice) => {
+export const buildInvoiceShareMessage = (invoice, req) =>
+  `Hello ${invoice.customerSnapshot.name}, your invoice is ready. Download here: ${buildPublicInvoicePdfUrl(invoice, req)}`;
+
+export const buildWhatsAppLink = (invoice, req) => {
   const phone = invoice.customerSnapshot.phone.replace(/[^\d]/g, '');
-  const message = `Hello ${invoice.customerSnapshot.name}, your invoice is ready. Download here: ${invoice.pdfUrl}`;
+  const message = buildInvoiceShareMessage(invoice, req);
   return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
 };

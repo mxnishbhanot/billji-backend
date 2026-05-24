@@ -1,19 +1,40 @@
 import Invoice from '../models/Invoice.js';
 
+const parseDateParam = (value) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }
+  return new Date(value);
+};
 const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
 const addDays = (date, days) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
 const startOfMonth = (date) => new Date(date.getFullYear(), date.getMonth(), 1);
+const endOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
 
-export const getReportSummary = async (userId) => {
+const buildDateFilter = ({ from, to } = {}) => {
+  if (!from && !to) return null;
+  const filter = {};
+  if (from) filter.$gte = startOfDay(parseDateParam(from));
+  if (to) filter.$lte = endOfDay(parseDateParam(to));
+  return filter;
+};
+
+export const getReportSummary = async (userId, range = {}) => {
   const now = new Date();
   const todayStart = startOfDay(now);
   const tomorrow = addDays(todayStart, 1);
   const weekStart = addDays(todayStart, -6);
   const monthStart = startOfMonth(now);
+  const rangeDateFilter = buildDateFilter(range);
+  const baseFilter = rangeDateFilter ? { user: userId, date: rangeDateFilter } : { user: userId };
+  const rangePaidFilter = { ...baseFilter, status: 'paid' };
+  const trendFilter = rangeDateFilter ? rangePaidFilter : { user: userId, status: 'paid', date: { $gte: weekStart, $lt: tomorrow } };
+  const rangeLabel = rangeDateFilter ? 'Selected range' : 'Last 7 days';
 
   const paidFilter = { user: userId, status: 'paid' };
 
-  const [today, weekly, monthly, counts, topProducts, trend, recentInvoices] = await Promise.all([
+  const [today, weekly, monthly, rangeSales, counts, topProducts, trend, recentInvoices] = await Promise.all([
     Invoice.aggregate([
       { $match: { ...paidFilter, date: { $gte: todayStart, $lt: tomorrow } } },
       { $group: { _id: null, total: { $sum: '$total' } } }
@@ -27,7 +48,11 @@ export const getReportSummary = async (userId) => {
       { $group: { _id: null, total: { $sum: '$total' } } }
     ]),
     Invoice.aggregate([
-      { $match: { user: userId } },
+      { $match: trendFilter },
+      { $group: { _id: null, total: { $sum: '$total' } } }
+    ]),
+    Invoice.aggregate([
+      { $match: baseFilter },
       {
         $group: {
           _id: '$status',
@@ -37,7 +62,7 @@ export const getReportSummary = async (userId) => {
       }
     ]),
     Invoice.aggregate([
-      { $match: { user: userId, status: { $ne: 'cancelled' } } },
+      { $match: { ...baseFilter, status: { $ne: 'cancelled' } } },
       { $unwind: '$items' },
       {
         $group: {
@@ -50,7 +75,7 @@ export const getReportSummary = async (userId) => {
       { $limit: 5 }
     ]),
     Invoice.aggregate([
-      { $match: { ...paidFilter, date: { $gte: weekStart, $lt: tomorrow } } },
+      { $match: trendFilter },
       {
         $group: {
           _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
@@ -60,7 +85,7 @@ export const getReportSummary = async (userId) => {
       },
       { $sort: { _id: 1 } }
     ]),
-    Invoice.find({ user: userId }).sort({ createdAt: -1 }).limit(6)
+    Invoice.find(baseFilter).sort({ createdAt: -1 }).limit(6)
   ]);
 
   const totalInvoices = counts.reduce((sum, item) => sum + item.count, 0);
@@ -71,6 +96,8 @@ export const getReportSummary = async (userId) => {
     todaySales: today[0]?.total || 0,
     weeklySales: weekly[0]?.total || 0,
     monthlySales: monthly[0]?.total || 0,
+    rangeSales: rangeSales[0]?.total || 0,
+    rangeLabel,
     totalInvoices,
     pendingInvoices: pending,
     averageInvoiceValue: totalInvoices ? totalValue / totalInvoices : 0,
