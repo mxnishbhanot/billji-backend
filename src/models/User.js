@@ -7,6 +7,7 @@ const businessProfileSchema = new mongoose.Schema(
     logoUrl: { type: String, default: '' },
     gstNumber: { type: String, default: '', trim: true, uppercase: true, maxlength: 32 },
     phone: { type: String, default: '', trim: true, maxlength: 24 },
+    countryCode: { type: String, default: '+91', trim: true, maxlength: 6 },
     email: { type: String, default: '', trim: true, lowercase: true, maxlength: 120 },
     address: { type: String, default: '', trim: true, maxlength: 500 },
     invoicePrefix: { type: String, default: 'INV', trim: true, uppercase: true, maxlength: 12 },

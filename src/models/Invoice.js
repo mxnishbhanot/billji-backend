@@ -4,6 +4,7 @@ const customerSnapshotSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
     phone: { type: String, required: true, trim: true },
+    countryCode: { type: String, default: '+91', trim: true },
     email: { type: String, default: '', trim: true, lowercase: true },
     address: { type: String, default: '', trim: true }
   },

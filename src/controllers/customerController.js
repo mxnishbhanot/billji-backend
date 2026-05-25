@@ -8,6 +8,7 @@ import { paginateQuery, wantsPagination } from '../utils/pagination.js';
 export const customerRules = [
   body('name').trim().notEmpty().withMessage('Customer name is required').isLength({ max: 120 }),
   body('phone').trim().notEmpty().withMessage('Phone is required').isLength({ max: 24 }),
+  body('countryCode').optional().trim().isLength({ max: 6 }),
   body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
   body('address').optional({ nullable: true }).trim().isLength({ max: 500 })
 ];

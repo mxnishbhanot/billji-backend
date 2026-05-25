@@ -58,6 +58,7 @@ export const buildCustomerSnapshot = async (userId, payload) => {
       snapshot: {
         name: customer.name,
         phone: customer.phone,
+        countryCode: customer.countryCode || '+91',
         email: customer.email,
         address: customer.address
       }
@@ -73,6 +74,7 @@ export const buildCustomerSnapshot = async (userId, payload) => {
     snapshot: {
       name: payload.customer.name,
       phone: payload.customer.phone,
+      countryCode: payload.customer.countryCode || '+91',
       email: payload.customer.email || '',
       address: payload.customer.address || ''
     }
@@ -253,7 +255,8 @@ export const buildInvoiceShareMessage = (invoice, req) =>
   `Hello ${invoice.customerSnapshot.name}, your invoice is ready. Download here: ${buildPublicInvoicePdfUrl(invoice, req)}`;
 
 export const buildWhatsAppLink = (invoice, req) => {
+  const countryCode = (invoice.customerSnapshot.countryCode || '+91').replace('+', '');
   const phone = invoice.customerSnapshot.phone.replace(/[^\d]/g, '');
   const message = buildInvoiceShareMessage(invoice, req);
-  return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+  return `https://wa.me/${countryCode}${phone}?text=${encodeURIComponent(message)}`;
 };

@@ -28,6 +28,7 @@ export const settingsRules = [
   body('logoUrl').optional({ nullable: true, checkFalsy: true }).isString(),
   body('gstNumber').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 32 }),
   body('phone').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 24 }),
+  body('countryCode').optional().trim().isLength({ max: 6 }),
   body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
   body('address').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 500 }),
   body('invoicePrefix').optional().trim().isLength({ min: 1, max: 12 }),
@@ -75,7 +76,7 @@ export const me = asyncHandler(async (req, res) => {
 });
 
 export const updateSettings = asyncHandler(async (req, res) => {
-  const allowed = ['businessName', 'logoUrl', 'gstNumber', 'phone', 'email', 'address', 'invoicePrefix', 'theme'];
+  const allowed = ['businessName', 'logoUrl', 'gstNumber', 'phone', 'countryCode', 'email', 'address', 'invoicePrefix', 'theme'];
   const nextProfile = { ...req.user.businessProfile.toObject() };
 
   allowed.forEach((field) => {

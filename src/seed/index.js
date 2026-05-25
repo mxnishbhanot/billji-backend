@@ -18,7 +18,8 @@ const seed = async () => {
     businessProfile: {
       businessName: 'Quick Mart',
       gstNumber: '29ABCDE1234F1Z5',
-      phone: '+919876543210',
+      phone: '9876543210',
+      countryCode: '+91',
       email: 'demo@quickinvoice.app',
       address: 'MG Road, Bengaluru',
       invoicePrefix: 'QM'
@@ -33,8 +34,8 @@ const seed = async () => {
   ]);
 
   const customers = await Customer.insertMany([
-    { user: user._id, name: 'Anita Sharma', phone: '+919900001111', email: 'anita@example.com', address: 'Indiranagar, Bengaluru' },
-    { user: user._id, name: 'Rahul Mehta', phone: '+919900002222', email: 'rahul@example.com', address: 'Koramangala, Bengaluru' }
+    { user: user._id, name: 'Anita Sharma', phone: '9900001111', countryCode: '+91', email: 'anita@example.com', address: 'Indiranagar, Bengaluru' },
+    { user: user._id, name: 'Rahul Mehta', phone: '9900002222', countryCode: '+91', email: 'rahul@example.com', address: 'Koramangala, Bengaluru' }
   ]);
 
   const invoicePayloads = [
