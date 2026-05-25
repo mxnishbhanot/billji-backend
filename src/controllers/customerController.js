@@ -14,12 +14,13 @@ export const customerRules = [
 
 export const customerQueryRules = [
   query('search').optional().trim().isLength({ max: 80 }),
+  query('contactInfo').optional({ checkFalsy: true }).isIn(['withEmail', 'withoutEmail', 'withAddress', 'withoutAddress']),
   query('page').optional({ checkFalsy: true }).isInt({ min: 1 }).withMessage('Page must be 1 or greater'),
   query('limit').optional({ checkFalsy: true }).isInt({ min: 1, max: 50 }).withMessage('Limit must be between 1 and 50')
 ];
 
 export const listCustomers = asyncHandler(async (req, res) => {
-  const { search = '' } = req.query;
+  const { search = '', contactInfo = '' } = req.query;
   const filter = { user: req.user._id };
 
   if (search) {
@@ -28,6 +29,16 @@ export const listCustomers = asyncHandler(async (req, res) => {
       { phone: { $regex: search, $options: 'i' } },
       { email: { $regex: search, $options: 'i' } }
     ];
+  }
+
+  if (contactInfo === 'withEmail') {
+    filter.email = { $nin: ['', null] };
+  } else if (contactInfo === 'withoutEmail') {
+    filter.email = { $in: ['', null] };
+  } else if (contactInfo === 'withAddress') {
+    filter.address = { $nin: ['', null] };
+  } else if (contactInfo === 'withoutAddress') {
+    filter.address = { $in: ['', null] };
   }
 
   const query = Customer.find(filter).sort({ updatedAt: -1 });
