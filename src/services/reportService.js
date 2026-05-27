@@ -85,7 +85,7 @@ export const getReportSummary = async (userId, range = {}) => {
       },
       { $sort: { _id: 1 } }
     ]),
-    Invoice.find(baseFilter).sort({ createdAt: -1 }).limit(6)
+    Invoice.find(baseFilter).sort({ createdAt: -1 }).limit(5)
   ]);
 
   const totalInvoices = counts.reduce((sum, item) => sum + item.count, 0);

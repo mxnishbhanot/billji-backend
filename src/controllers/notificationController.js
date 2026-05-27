@@ -23,6 +23,11 @@ const notificationId = (type, item) => {
   const stamp = new Date(item.updatedAt || item.createdAt || item.date || Date.now()).getTime();
   return `${type}:${item._id}:${stamp}`;
 };
+const priorityForTone = (tone) => {
+  if (tone === 'danger') return 1;
+  if (tone === 'warning') return 2;
+  return 3;
+};
 
 const productNotification = ({ type, product, tone, title, description }) => ({
   id: notificationId(type, product),
@@ -34,7 +39,7 @@ const productNotification = ({ type, product, tone, title, description }) => ({
   description,
   to: `/products?highlight=${product._id}`,
   sortDate: product.updatedAt || product.createdAt,
-  priority: tone === 'danger' ? 1 : 2
+  priority: priorityForTone(tone)
 });
 
 const invoiceNotification = ({ type, invoice, tone, title, description }) => ({
@@ -47,13 +52,14 @@ const invoiceNotification = ({ type, invoice, tone, title, description }) => ({
   description,
   to: `/invoices/${invoice._id}`,
   sortDate: invoice.dueDate || invoice.updatedAt || invoice.createdAt || invoice.date,
-  priority: tone === 'danger' ? 1 : 2
+  priority: priorityForTone(tone)
 });
 
 const notificationFilters = (userId) => {
   const today = startOfDay();
   const soonLimit = new Date(today.getTime() + 3 * DAY_MS);
   const oldPendingLimit = new Date(today.getTime() - 7 * DAY_MS);
+  const recentActivityLimit = new Date(today.getTime() - 7 * DAY_MS);
 
   return {
     negativeStock: { user: userId, stockQuantity: { $lt: 0 } },
@@ -64,7 +70,8 @@ const notificationFilters = (userId) => {
     },
     overdueInvoices: { user: userId, status: 'pending', dueDate: { $lt: today } },
     dueSoonInvoices: { user: userId, status: 'pending', dueDate: { $gte: today, $lte: soonLimit } },
-    oldPendingInvoices: { user: userId, status: 'pending', dueDate: null, createdAt: { $lte: oldPendingLimit } }
+    oldPendingInvoices: { user: userId, status: 'pending', dueDate: null, createdAt: { $lte: oldPendingLimit } },
+    recentInvoices: { user: userId, status: { $ne: 'cancelled' }, createdAt: { $gte: recentActivityLimit } }
   };
 };
 
@@ -77,12 +84,13 @@ const buildNotifications = async (userId, fetchLimit) => {
   }
 
   const filters = notificationFilters(userId);
-  const [negativeStock, lowStock, overdueInvoices, dueSoonInvoices, oldPendingInvoices] = await Promise.all([
+  const [negativeStock, lowStock, overdueInvoices, dueSoonInvoices, oldPendingInvoices, recentInvoices] = await Promise.all([
     Product.find(filters.negativeStock).sort({ updatedAt: -1 }).limit(fetchLimit).lean(),
     Product.find(filters.lowStock).sort({ updatedAt: -1 }).limit(fetchLimit).lean(),
     Invoice.find(filters.overdueInvoices).sort({ dueDate: 1, updatedAt: -1 }).limit(fetchLimit).lean(),
     Invoice.find(filters.dueSoonInvoices).sort({ dueDate: 1, updatedAt: -1 }).limit(fetchLimit).lean(),
-    Invoice.find(filters.oldPendingInvoices).sort({ createdAt: 1 }).limit(fetchLimit).lean()
+    Invoice.find(filters.oldPendingInvoices).sort({ createdAt: 1 }).limit(fetchLimit).lean(),
+    Invoice.find(filters.recentInvoices).sort({ createdAt: -1 }).limit(fetchLimit).lean()
   ]);
 
   return sortNotifications([
@@ -130,6 +138,15 @@ const buildNotifications = async (userId, fetchLimit) => {
         title: `${invoice.invoiceNumber} needs follow-up`,
         description: `${invoice.customerSnapshot.name} has been pending since ${formatDate(invoice.createdAt || invoice.date)}.`
       })
+    ),
+    ...recentInvoices.map((invoice) =>
+      invoiceNotification({
+        type: 'invoice-created',
+        invoice: { ...invoice, dueDate: null, updatedAt: invoice.createdAt },
+        tone: 'info',
+        title: `${invoice.invoiceNumber} was created`,
+        description: `${invoice.customerSnapshot.name} · ${new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(Number(invoice.total || 0))}.`
+      })
     )
   ]);
 };
@@ -141,7 +158,8 @@ const countNotifications = async (userId) => {
     Product.countDocuments(filters.lowStock),
     Invoice.countDocuments(filters.overdueInvoices),
     Invoice.countDocuments(filters.dueSoonInvoices),
-    Invoice.countDocuments(filters.oldPendingInvoices)
+    Invoice.countDocuments(filters.oldPendingInvoices),
+    Invoice.countDocuments(filters.recentInvoices)
   ]);
 
   return counts.reduce((sum, count) => sum + count, 0);
@@ -149,36 +167,65 @@ const countNotifications = async (userId) => {
 
 export const listNotifications = asyncHandler(async (req, res) => {
   const { page, limit, skip } = getPagination(req.query, { defaultLimit: 10, maxLimit: 50 });
-  const total = await countNotifications(req.user._id);
-  const [pageCandidates, allCandidates] = await Promise.all([
-    buildNotifications(req.user._id, Math.min(skip + limit, total)),
-    buildNotifications(req.user._id, total)
-  ]);
-  const pageNotifications = pageCandidates.slice(skip, skip + limit);
-  const readIds = new Set(
-    (
-      await NotificationRead.find({
-        user: req.user._id,
-        notificationId: { $in: allCandidates.map((notification) => notification.id) }
-      }).select('notificationId')
-    ).map((read) => read.notificationId)
-  );
+  const rawTotal = await countNotifications(req.user._id);
+  const allCandidates = await buildNotifications(req.user._id, rawTotal);
+  const states = await NotificationRead.find({
+    user: req.user._id,
+    notificationId: { $in: allCandidates.map((notification) => notification.id) }
+  }).select('notificationId readAt dismissedAt');
+  const stateById = new Map(states.map((state) => [state.notificationId, state]));
+  const visibleCandidates = allCandidates.filter((notification) => !stateById.get(notification.id)?.dismissedAt);
+  const pageNotifications = visibleCandidates.slice(skip, skip + limit);
 
   const notifications = pageNotifications.map((notification) => ({
     ...notification,
-    read: readIds.has(notification.id)
+    read: Boolean(stateById.get(notification.id))
   }));
-  const unreadCount = allCandidates.filter((notification) => !readIds.has(notification.id)).length;
+  const unreadCount = visibleCandidates.filter((notification) => !stateById.get(notification.id)).length;
 
   res.json({
     success: true,
     notifications,
     unreadCount,
-    pagination: paginationMeta({ page, limit, total })
+    pagination: paginationMeta({ page, limit, total: visibleCandidates.length })
   });
 });
 
 export const markNotificationsSeen = asyncHandler(async (req, res) => {
+  let notificationIds = Array.isArray(req.body.notificationIds) ? req.body.notificationIds.filter(Boolean) : [];
+
+  if (req.body.all) {
+    const rawTotal = await countNotifications(req.user._id);
+    const allCandidates = await buildNotifications(req.user._id, rawTotal);
+    const dismissed = new Set(
+      (
+        await NotificationRead.find({
+          user: req.user._id,
+          dismissedAt: { $ne: null },
+          notificationId: { $in: allCandidates.map((notification) => notification.id) }
+        }).select('notificationId')
+      ).map((state) => state.notificationId)
+    );
+    notificationIds = allCandidates.map((notification) => notification.id).filter((id) => !dismissed.has(id));
+  }
+
+  if (notificationIds.length) {
+    await NotificationRead.bulkWrite(
+      Array.from(new Set(notificationIds)).map((id) => ({
+        updateOne: {
+          filter: { user: req.user._id, notificationId: id },
+          update: { $set: { readAt: new Date() }, $setOnInsert: { user: req.user._id, notificationId: id } },
+          upsert: true
+        }
+      })),
+      { ordered: false }
+    );
+  }
+
+  res.json({ success: true });
+});
+
+export const dismissNotifications = asyncHandler(async (req, res) => {
   const notificationIds = Array.isArray(req.body.notificationIds) ? req.body.notificationIds.filter(Boolean) : [];
 
   if (notificationIds.length) {
@@ -186,7 +233,7 @@ export const markNotificationsSeen = asyncHandler(async (req, res) => {
       Array.from(new Set(notificationIds)).map((id) => ({
         updateOne: {
           filter: { user: req.user._id, notificationId: id },
-          update: { $setOnInsert: { user: req.user._id, notificationId: id } },
+          update: { $set: { dismissedAt: new Date(), readAt: new Date() }, $setOnInsert: { user: req.user._id, notificationId: id } },
           upsert: true
         }
       })),

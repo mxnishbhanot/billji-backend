@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { body, query } from 'express-validator';
-import { listNotifications, markNotificationsSeen } from '../controllers/notificationController.js';
+import { dismissNotifications, listNotifications, markNotificationsSeen } from '../controllers/notificationController.js';
 import { protect } from '../middlewares/auth.js';
 import { validate } from '../middlewares/validate.js';
 
@@ -18,9 +18,15 @@ router.get(
 );
 router.patch(
   '/seen',
-  [body('notificationIds').optional().isArray(), body('notificationIds.*').optional().isString().isLength({ max: 180 })],
+  [body('all').optional().isBoolean(), body('notificationIds').optional().isArray(), body('notificationIds.*').optional().isString().isLength({ max: 180 })],
   validate,
   markNotificationsSeen
+);
+router.patch(
+  '/dismiss',
+  [body('notificationIds').isArray({ min: 1 }), body('notificationIds.*').isString().isLength({ max: 180 })],
+  validate,
+  dismissNotifications
 );
 
 export default router;

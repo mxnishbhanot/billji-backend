@@ -3,7 +3,9 @@ import mongoose from 'mongoose';
 const notificationReadSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    notificationId: { type: String, required: true, maxlength: 180 }
+    notificationId: { type: String, required: true, maxlength: 180 },
+    readAt: { type: Date, default: null },
+    dismissedAt: { type: Date, default: null }
   },
   { timestamps: true }
 );
