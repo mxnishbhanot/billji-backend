@@ -18,12 +18,16 @@ export const productRules = [
 export const productQueryRules = [
   query('search').optional().trim().isLength({ max: 80 }),
   query('category').optional().trim().isLength({ max: 80 }),
+  query('stockStatus').optional().isIn(['all', 'available', 'low', 'out']),
+  query('minPrice').optional({ checkFalsy: true }).isFloat({ min: 0 }),
+  query('maxPrice').optional({ checkFalsy: true }).isFloat({ min: 0 }),
+  query('sort').optional().isIn(['updated', 'name-asc', 'price-high', 'price-low', 'stock-low']),
   query('page').optional({ checkFalsy: true }).isInt({ min: 1 }).withMessage('Page must be 1 or greater'),
   query('limit').optional({ checkFalsy: true }).isInt({ min: 1, max: 50 }).withMessage('Limit must be between 1 and 50')
 ];
 
 export const listProducts = asyncHandler(async (req, res) => {
-  const { search = '', category = '' } = req.query;
+  const { search = '', category = '', stockStatus = 'all', minPrice = '', maxPrice = '', sort = 'updated' } = req.query;
   const filter = { user: req.user._id };
 
   if (search) {
@@ -38,7 +42,29 @@ export const listProducts = asyncHandler(async (req, res) => {
     filter.category = category;
   }
 
-  const query = Product.find(filter).sort({ updatedAt: -1 });
+  if (minPrice || maxPrice) {
+    filter.price = {};
+    if (minPrice) filter.price.$gte = Number(minPrice);
+    if (maxPrice) filter.price.$lte = Number(maxPrice);
+  }
+
+  if (stockStatus === 'available') {
+    filter.stockQuantity = { $gt: 0 };
+  } else if (stockStatus === 'out') {
+    filter.stockQuantity = { $lte: 0 };
+  } else if (stockStatus === 'low') {
+    filter.$expr = { $lte: ['$stockQuantity', '$lowStockThreshold'] };
+  }
+
+  const sortMap = {
+    updated: { updatedAt: -1 },
+    'name-asc': { name: 1 },
+    'price-high': { price: -1 },
+    'price-low': { price: 1 },
+    'stock-low': { stockQuantity: 1 }
+  };
+
+  const query = Product.find(filter).sort(sortMap[sort] || sortMap.updated);
 
   if (wantsPagination(req.query)) {
     const { items, pagination } = await paginateQuery(query, Product.countDocuments(filter), req.query);
@@ -47,6 +73,21 @@ export const listProducts = asyncHandler(async (req, res) => {
 
   const products = await query;
   res.json({ success: true, products });
+});
+
+export const listProductCategories = asyncHandler(async (req, res) => {
+  const categories = await Product.distinct('category', {
+    user: req.user._id,
+    category: { $nin: ['', null] }
+  });
+
+  res.json({
+    success: true,
+    categories: categories
+      .filter((category) => typeof category === 'string' && category.trim())
+      .map((category) => category.trim())
+      .sort((a, b) => a.localeCompare(b))
+  });
 });
 
 const emitProductChanges = (userId, reason) => {

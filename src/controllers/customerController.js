@@ -1,5 +1,6 @@
 import { body, query } from 'express-validator';
 import Customer from '../models/Customer.js';
+import Invoice from '../models/Invoice.js';
 import { emitUserEvent } from '../services/socketService.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
@@ -15,12 +16,14 @@ export const customerRules = [
 export const customerQueryRules = [
   query('search').optional().trim().isLength({ max: 80 }),
   query('contactInfo').optional({ checkFalsy: true }).isIn(['withEmail', 'withoutEmail', 'withAddress', 'withoutAddress']),
+  query('billingStatus').optional().isIn(['all', 'invoiced', 'notInvoiced', 'pending', 'paid']),
+  query('sort').optional().isIn(['updated', 'newest', 'oldest', 'name-asc']),
   query('page').optional({ checkFalsy: true }).isInt({ min: 1 }).withMessage('Page must be 1 or greater'),
   query('limit').optional({ checkFalsy: true }).isInt({ min: 1, max: 50 }).withMessage('Limit must be between 1 and 50')
 ];
 
 export const listCustomers = asyncHandler(async (req, res) => {
-  const { search = '', contactInfo = '' } = req.query;
+  const { search = '', contactInfo = '', billingStatus = 'all', sort = 'updated' } = req.query;
   const filter = { user: req.user._id };
 
   if (search) {
@@ -41,7 +44,32 @@ export const listCustomers = asyncHandler(async (req, res) => {
     filter.address = { $in: ['', null] };
   }
 
-  const query = Customer.find(filter).sort({ updatedAt: -1 });
+  if (billingStatus && billingStatus !== 'all') {
+    const invoiceFilter = {
+      user: req.user._id,
+      customer: { $ne: null }
+    };
+
+    if (billingStatus === 'pending') invoiceFilter.status = 'pending';
+    if (billingStatus === 'paid') invoiceFilter.status = 'paid';
+
+    const invoicedCustomerIds = await Invoice.distinct('customer', invoiceFilter);
+
+    if (billingStatus === 'notInvoiced') {
+      filter._id = { $nin: invoicedCustomerIds };
+    } else {
+      filter._id = { $in: invoicedCustomerIds };
+    }
+  }
+
+  const sortMap = {
+    updated: { updatedAt: -1 },
+    newest: { createdAt: -1 },
+    oldest: { createdAt: 1 },
+    'name-asc': { name: 1 }
+  };
+
+  const query = Customer.find(filter).sort(sortMap[sort] || sortMap.updated);
 
   if (wantsPagination(req.query)) {
     const { items, pagination } = await paginateQuery(query, Customer.countDocuments(filter), req.query);

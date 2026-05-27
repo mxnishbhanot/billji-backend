@@ -28,8 +28,14 @@ export const settingsRules = [
   body('logoUrl').optional({ nullable: true, checkFalsy: true }).isString(),
   body('gstNumber').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 32 }),
   body('phone').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 24 }),
+  body('countryCode').optional({ nullable: true, checkFalsy: true }).trim().matches(/^\+\d{1,7}$/).withMessage('Enter a valid country code'),
   body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
+  body('website').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 180 }).isURL({ require_protocol: false }),
   body('address').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 500 }),
+  body('city').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 80 }),
+  body('pinCode').optional({ nullable: true, checkFalsy: true }).trim().matches(/^\d{6}$/).withMessage('PIN code must be 6 digits'),
+  body('state').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 80 }),
+  body('panNumber').optional({ nullable: true, checkFalsy: true }).trim().matches(/^[A-Z]{5}[0-9]{4}[A-Z]$/i).withMessage('Enter a valid PAN'),
   body('invoicePrefix').optional().trim().isLength({ min: 1, max: 12 }),
   body('theme').optional().isIn(['light', 'dark'])
 ];
@@ -75,7 +81,7 @@ export const me = asyncHandler(async (req, res) => {
 });
 
 export const updateSettings = asyncHandler(async (req, res) => {
-  const allowed = ['businessName', 'logoUrl', 'gstNumber', 'phone', 'email', 'address', 'invoicePrefix', 'theme'];
+  const allowed = ['businessName', 'logoUrl', 'gstNumber', 'phone', 'countryCode', 'email', 'website', 'address', 'city', 'pinCode', 'state', 'invoicePrefix', 'panNumber', 'theme'];
   const nextProfile = { ...req.user.businessProfile.toObject() };
 
   allowed.forEach((field) => {
