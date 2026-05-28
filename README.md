@@ -83,15 +83,49 @@ Health check: `http://localhost:5000/health`
 
 All protected endpoints require `Authorization: Bearer <token>`.
 
-- Auth: `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`.
-- Settings: `GET /api/settings`, `PATCH /api/settings`.
-- Products: `GET /api/products`, `POST /api/products`, `PATCH /api/products/:id`, `DELETE /api/products/:id`.
-- Customers: `GET /api/customers`, `POST /api/customers`, `PATCH /api/customers/:id`, `DELETE /api/customers/:id`.
-- Invoices: `GET /api/invoices`, `POST /api/invoices`, `GET /api/invoices/:id`, `PATCH /api/invoices/:id/status`, `POST /api/invoices/:id/duplicate`, `DELETE /api/invoices/:id`.
-- Sharing: `GET /api/invoices/:id/pdf`, `GET /api/invoices/:id/whatsapp`, `POST /api/invoices/:id/email`.
+- Versioned endpoints are mounted at `/api/v1`.
+- Existing `/api` endpoints remain available as a compatibility alias.
+- Auth: `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, `GET /api/v1/auth/me`.
+- Settings: `GET /api/v1/settings`, `PATCH /api/v1/settings`.
+- Products: `GET /api/v1/products`, `POST /api/v1/products`, `PATCH /api/v1/products/:id`, `DELETE /api/v1/products/:id`.
+- Customers: `GET /api/v1/customers`, `POST /api/v1/customers`, `PATCH /api/v1/customers/:id`, `DELETE /api/v1/customers/:id`.
+- Invoices: `GET /api/v1/invoices`, `POST /api/v1/invoices`, `GET /api/v1/invoices/:id`, `PATCH /api/v1/invoices/:id/status`, `POST /api/v1/invoices/:id/duplicate`, `DELETE /api/v1/invoices/:id`.
+- Sharing: `GET /api/v1/invoices/:id/pdf`, `GET /api/v1/invoices/:id/whatsapp`, `POST /api/v1/invoices/:id/email`.
 - Public PDF link: `GET /api/public/invoices/:id/:token/pdf`.
-- Reports: `GET /api/reports/summary`.
-- Notifications: `GET /api/notifications`, `PATCH /api/notifications/seen`.
+- Reports: `GET /api/v1/reports/summary`.
+- Notifications: `GET /api/v1/notifications`, `PATCH /api/v1/notifications/seen`.
+
+## Phase 0 Contract
+
+Backend ownership is business-scoped. Auth identifies the acting `User`; protected requests resolve `req.business` from the active `BusinessMember`. Core business records use `business` as the tenant field and `createdBy` / `updatedBy` for actor context.
+
+Responses keep the current envelope:
+
+```json
+{ "success": true }
+```
+
+Errors keep:
+
+```json
+{ "success": false, "message": "Error summary", "details": null }
+```
+
+Critical write clients should send `Idempotency-Key` for retry-safe mutations.
+
+## Phase 1 Backend Foundation
+
+The backend is moving toward a modular monolith. Invoice write behavior now has a focused module boundary under `src/modules/invoices`, while legacy route imports continue to preserve public URLs.
+
+Critical invoice writes are transaction-wrapped:
+
+- `POST /api/v1/invoices`
+- `POST /api/v1/invoices/:id/duplicate`
+- `DELETE /api/v1/invoices/:id`
+
+These routes support `Idempotency-Key`. If the same key is retried with the same request, the cached response is replayed after completion. Reusing the key with a different request returns a conflict. Requests without the header still work for compatibility, but clients should send it for duplicate-tap protection.
+
+Invoice numbering uses `NumberSequence` per business, document type, and financial year. MongoDB transactions require a replica set or Atlas-compatible deployment.
 
 ## Deploy
 

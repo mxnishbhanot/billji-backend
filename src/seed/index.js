@@ -1,5 +1,7 @@
 import mongoose from 'mongoose';
 import { connectDB } from '../config/db.js';
+import Business from '../models/Business.js';
+import BusinessMember from '../models/BusinessMember.js';
 import Customer from '../models/Customer.js';
 import Invoice from '../models/Invoice.js';
 import Product from '../models/Product.js';
@@ -14,27 +16,31 @@ const seed = async () => {
   const user = await User.create({
     name: 'Demo Owner',
     email: 'demo@quickinvoice.app',
-    password: 'password123',
-    businessProfile: {
-      businessName: 'Quick Mart',
-      gstNumber: '29ABCDE1234F1Z5',
-      phone: '+919876543210',
-      email: 'demo@quickinvoice.app',
-      address: 'MG Road, Bengaluru',
-      invoicePrefix: 'QM'
-    }
+    password: 'password123'
   });
+  const business = await Business.create({
+    owner: user._id,
+    businessName: 'Quick Mart',
+    gstNumber: '29ABCDE1234F1Z5',
+    phone: '+919876543210',
+    email: 'demo@quickinvoice.app',
+    address: 'MG Road, Bengaluru',
+    invoicePrefix: 'QM'
+  });
+  await BusinessMember.create({ business: business._id, user: user._id, roleKey: 'owner', joinedAt: new Date() });
+  user.defaultBusiness = business._id;
+  await user.save();
 
   const products = await Product.insertMany([
-    { user: user._id, name: 'Premium Coffee Beans', price: 450, stockQuantity: 24, sku: 'COF-001', category: 'Grocery' },
-    { user: user._id, name: 'Notebook A5', price: 80, stockQuantity: 6, sku: 'NOTE-A5', category: 'Stationery' },
-    { user: user._id, name: 'USB-C Cable', price: 299, stockQuantity: 3, sku: 'USB-C-1M', category: 'Electronics' },
-    { user: user._id, name: 'Desk Lamp', price: 1299, stockQuantity: 10, sku: 'LAMP-01', category: 'Home' }
+    { business: business._id, createdBy: user._id, updatedBy: user._id, name: 'Premium Coffee Beans', price: 450, stockQuantity: 24, sku: 'COF-001', category: 'Grocery' },
+    { business: business._id, createdBy: user._id, updatedBy: user._id, name: 'Notebook A5', price: 80, stockQuantity: 6, sku: 'NOTE-A5', category: 'Stationery' },
+    { business: business._id, createdBy: user._id, updatedBy: user._id, name: 'USB-C Cable', price: 299, stockQuantity: 3, sku: 'USB-C-1M', category: 'Electronics' },
+    { business: business._id, createdBy: user._id, updatedBy: user._id, name: 'Desk Lamp', price: 1299, stockQuantity: 10, sku: 'LAMP-01', category: 'Home' }
   ]);
 
   const customers = await Customer.insertMany([
-    { user: user._id, name: 'Anita Sharma', phone: '+919900001111', email: 'anita@example.com', address: 'Indiranagar, Bengaluru' },
-    { user: user._id, name: 'Rahul Mehta', phone: '+919900002222', email: 'rahul@example.com', address: 'Koramangala, Bengaluru' }
+    { business: business._id, createdBy: user._id, updatedBy: user._id, name: 'Anita Sharma', phone: '+919900001111', email: 'anita@example.com', address: 'Indiranagar, Bengaluru' },
+    { business: business._id, createdBy: user._id, updatedBy: user._id, name: 'Rahul Mehta', phone: '+919900002222', email: 'rahul@example.com', address: 'Koramangala, Bengaluru' }
   ]);
 
   const invoicePayloads = [
@@ -63,7 +69,7 @@ const seed = async () => {
   ];
 
   for (const payload of invoicePayloads) {
-    const invoice = await Invoice.create(await buildInvoicePayload(user, payload));
+    const invoice = await Invoice.create(await buildInvoicePayload(user, business, payload));
     await setInvoicePdfUrl(invoice);
     await stockAdjustmentsForInvoice(invoice, -1);
   }

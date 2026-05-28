@@ -1,13 +1,16 @@
 import Customer from '../models/Customer.js';
 import Invoice from '../models/Invoice.js';
 import Product from '../models/Product.js';
+import { domainStatusesForLegacy, legacyStatusFor } from '../models/SalesDocument.js';
 import StockMovement from '../models/StockMovement.js';
 import { env } from '../config/env.js';
 import { ApiError } from '../utils/ApiError.js';
 import { calculateInvoiceTotals } from '../utils/invoiceMath.js';
+import { nextDocumentNumber } from './numberingService.js';
 import crypto from 'crypto';
 
 const LOCAL_PUBLIC_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1']);
+const DEFAULT_SHARE_LINK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const trimTrailingSlash = (value) => value.replace(/\/+$/, '');
 
@@ -31,23 +34,63 @@ export const buildPublicInvoicePdfUrl = (invoice, req) => {
   return `${trimTrailingSlash(baseUrl)}/api/public/invoices/${invoice._id}/${invoice.shareToken}/pdf`;
 };
 
-export const serializeInvoice = (invoice, req) => ({
-  ...(invoice.toObject ? invoice.toObject() : invoice),
-  pdfUrl: buildPublicInvoicePdfUrl(invoice, req)
-});
+export const serializeInvoice = (invoice, req) => {
+  const data = invoice.toObject ? invoice.toObject() : invoice;
+  const paidAmount = data.paidAmount ?? (data.paymentStatus === 'paid' || data.paymentStatus === 'refunded' ? data.total : 0);
+  const balanceDue = data.balanceDue ?? Math.max(Number(data.total || 0) - Number(paidAmount || 0), 0);
 
-export const generateInvoiceNumber = async (user, date = new Date()) => {
-  const prefix = user.businessProfile?.invoicePrefix || 'INV';
-  const year = date.getFullYear();
-  const start = new Date(year, 0, 1);
-  const end = new Date(year + 1, 0, 1);
-  const count = await Invoice.countDocuments({ user: user._id, createdAt: { $gte: start, $lt: end } });
-  return `${prefix}-${year}-${String(count + 1).padStart(4, '0')}`;
+  return {
+    ...data,
+    invoiceNumber: invoice.invoiceNumber || invoice.documentNumber,
+    status: invoice.status || legacyStatusFor(invoice),
+    paidAmount,
+    balanceDue,
+    pdfUrl: buildPublicInvoicePdfUrl(invoice, req)
+  };
 };
 
-export const buildCustomerSnapshot = async (userId, payload) => {
+export const generateInvoiceNumber = async (business, date = new Date(), { session } = {}) =>
+  nextDocumentNumber({ business, documentType: 'invoice', date, session });
+
+const addressSnapshotFrom = (source = {}, fallback = '') => ({
+  line1: source.line1 || fallback || '',
+  line2: source.line2 || '',
+  city: source.city || '',
+  state: source.state || '',
+  pinCode: source.pinCode || source.pinCode === 0 ? String(source.pinCode) : '',
+  country: source.country || 'India'
+});
+
+const taxIdentifiersFrom = (source = {}) => ({
+  gstNumber: source.gstNumber || '',
+  panNumber: source.panNumber || '',
+  taxId: source.taxId || ''
+});
+
+const customerSnapshotFrom = (source) => {
+  const billingAddress = addressSnapshotFrom(source.billingAddress, source.address);
+  const shippingAddress = addressSnapshotFrom(source.shippingAddress, source.address);
+  const taxIdentifiers = taxIdentifiersFrom(source.taxIdentifiers);
+
+  return {
+    name: source.name,
+    phone: source.phone,
+    countryCode: source.countryCode || '+91',
+    email: source.email || '',
+    address: source.address || billingAddress.line1 || '',
+    billingAddress,
+    shippingAddress,
+    gstNumber: source.gstNumber || taxIdentifiers.gstNumber || '',
+    taxIdentifiers: {
+      ...taxIdentifiers,
+      gstNumber: taxIdentifiers.gstNumber || source.gstNumber || ''
+    }
+  };
+};
+
+export const buildCustomerSnapshot = async (businessId, payload, { session } = {}) => {
   if (payload.customerId) {
-    const customer = await Customer.findOne({ _id: payload.customerId, user: userId });
+    const customer = await Customer.findOne({ _id: payload.customerId, business: businessId }).session(session || null);
 
     if (!customer) {
       throw new ApiError(404, 'Customer not found');
@@ -55,12 +98,7 @@ export const buildCustomerSnapshot = async (userId, payload) => {
 
     return {
       customerId: customer._id,
-      snapshot: {
-        name: customer.name,
-        phone: customer.phone,
-        email: customer.email,
-        address: customer.address
-      }
+      snapshot: customerSnapshotFrom(customer)
     };
   }
 
@@ -70,16 +108,11 @@ export const buildCustomerSnapshot = async (userId, payload) => {
 
   return {
     customerId: null,
-    snapshot: {
-      name: payload.customer.name,
-      phone: payload.customer.phone,
-      email: payload.customer.email || '',
-      address: payload.customer.address || ''
-    }
+    snapshot: customerSnapshotFrom(payload.customer)
   };
 };
 
-export const normalizeItems = async (userId, items, { allowOversell = false } = {}) => {
+export const normalizeItems = async (businessId, items, { allowOversell = false, session } = {}) => {
   if (!Array.isArray(items) || items.length === 0) {
     throw new ApiError(422, 'At least one invoice item is required');
   }
@@ -90,7 +123,7 @@ export const normalizeItems = async (userId, items, { allowOversell = false } = 
 
   for (const item of items) {
     if (item.productId) {
-      const product = await Product.findOne({ _id: item.productId, user: userId });
+      const product = await Product.findOne({ _id: item.productId, business: businessId }).session(session || null);
 
       if (!product) {
         throw new ApiError(404, `Product not found: ${item.productId}`);
@@ -99,15 +132,20 @@ export const normalizeItems = async (userId, items, { allowOversell = false } = 
       const quantity = Number(item.quantity) || 1;
       const productId = String(product._id);
       const requested = requestedByProduct.get(productId) || { product, quantity: 0 };
-      requested.quantity += quantity;
-      requestedByProduct.set(productId, requested);
+      if (product.trackStock !== false) {
+        requested.quantity += quantity;
+        requestedByProduct.set(productId, requested);
+      }
 
       normalized.push({
         product: product._id,
         name: product.name,
         sku: product.sku,
+        unit: product.unit,
         quantity,
         price: item.price ?? product.price,
+        purchasePrice: product.purchasePrice,
+        taxRate: item.taxRate ?? product.taxRate,
         isCustom: false
       });
     } else {
@@ -115,8 +153,10 @@ export const normalizeItems = async (userId, items, { allowOversell = false } = 
         product: null,
         name: item.name,
         sku: item.sku || '',
+        unit: item.unit || 'pcs',
         quantity: item.quantity,
         price: item.price,
+        taxRate: item.taxRate || 0,
         isCustom: true
       });
     }
@@ -147,9 +187,9 @@ export const normalizeItems = async (userId, items, { allowOversell = false } = 
   return normalized;
 };
 
-export const buildInvoicePayload = async (user, payload) => {
-  const { customerId, snapshot } = await buildCustomerSnapshot(user._id, payload);
-  const items = await normalizeItems(user._id, payload.items, { allowOversell: Boolean(payload.allowOversell) });
+export const buildInvoicePayload = async (user, business, payload, { session } = {}) => {
+  const { customerId, snapshot } = await buildCustomerSnapshot(business._id, payload, { session });
+  const items = await normalizeItems(business._id, payload.items, { allowOversell: Boolean(payload.allowOversell), session });
   const totals = calculateInvoiceTotals({
     items,
     taxRate: payload.taxRate,
@@ -157,11 +197,16 @@ export const buildInvoicePayload = async (user, payload) => {
     discountValue: payload.discountValue
   });
   const date = payload.date ? new Date(payload.date) : new Date();
-  const invoiceNumber = payload.invoiceNumber || (await generateInvoiceNumber(user, date));
+  const invoiceNumber = payload.invoiceNumber || (await generateInvoiceNumber(business, date, { session }));
+  const domainStatuses = domainStatusesForLegacy(payload.status || 'pending');
 
   return {
-    user: user._id,
+    business: business._id,
+    createdBy: user._id,
+    updatedBy: user._id,
     customer: customerId,
+    documentType: 'invoice',
+    documentNumber: invoiceNumber,
     invoiceNumber,
     date,
     dueDate: payload.dueDate || null,
@@ -171,21 +216,28 @@ export const buildInvoicePayload = async (user, payload) => {
     tax: totals.tax,
     discount: totals.discount,
     total: totals.total,
+    paidAmount: payload.status === 'paid' ? totals.total : 0,
+    balanceDue: payload.status === 'paid' ? 0 : totals.total,
+    documentStatus: domainStatuses.documentStatus,
+    paymentStatus: domainStatuses.paymentStatus,
+    fulfillmentStatus: 'pending',
     status: payload.status || 'pending',
     notes: payload.notes || '',
     shareToken: crypto.randomBytes(24).toString('hex'),
+    shareExpiresAt: new Date(Date.now() + DEFAULT_SHARE_LINK_TTL_MS),
     pdfUrl: `${env.apiPublicUrl}/api/public/invoices/__pending__/pdf`
   };
 };
 
-export const setInvoicePdfUrl = async (invoice, req) => {
+export const setInvoicePdfUrl = async (invoice, req, { session } = {}) => {
   invoice.pdfUrl = buildPublicInvoicePdfUrl(invoice, req);
-  await invoice.save();
+  await invoice.save({ session });
   return invoice;
 };
 
-export const stockAdjustmentsForInvoice = async (invoice, direction = -1) => {
+export const stockAdjustmentsForInvoice = async (invoice, direction = -1, { session, allowOversell = false } = {}) => {
   const productAdjustments = new Map();
+  const movements = [];
 
   invoice.items
     .filter((item) => item.product)
@@ -203,28 +255,51 @@ export const stockAdjustmentsForInvoice = async (invoice, direction = -1) => {
 
   for (const adjustment of productAdjustments.values()) {
     const quantityChange = direction * adjustment.quantity;
+    const stockFilter = { _id: adjustment.product, business: invoice.business, trackStock: { $ne: false } };
+    if (direction < 0 && !allowOversell) {
+      stockFilter.stockQuantity = { $gte: adjustment.quantity };
+    }
+
     const product = await Product.findOneAndUpdate(
-      { _id: adjustment.product, user: invoice.user },
+      stockFilter,
       { $inc: { stockQuantity: quantityChange } },
-      { new: false }
+      { new: false, session }
     );
 
     if (!product) {
-      continue;
+      const currentProduct = await Product.findOne({ _id: adjustment.product, business: invoice.business }).session(session || null);
+      if (!currentProduct) {
+        continue;
+      }
+
+      if (currentProduct.trackStock === false) {
+        continue;
+      }
+
+      throw new ApiError(409, 'Some products do not have enough app stock', {
+        code: 'INSUFFICIENT_STOCK',
+        items: [{
+          productId: currentProduct._id,
+          name: currentProduct.name,
+          sku: currentProduct.sku,
+          requested: adjustment.quantity,
+          available: currentProduct.stockQuantity,
+          shortage: adjustment.quantity - currentProduct.stockQuantity
+        }]
+      });
     }
 
     const stockBefore = product.stockQuantity;
     const stockAfter = stockBefore + quantityChange;
-    const type =
-      direction > 0
-        ? 'invoice_deleted'
-        : stockBefore < adjustment.quantity
-          ? 'oversell'
-          : 'sale';
+    const type = direction > 0 ? 'sale_cancelled' : 'sale';
 
-    await StockMovement.create({
-      user: invoice.user,
+    const [movement] = await StockMovement.create([{
+      business: invoice.business,
+      createdBy: invoice.updatedBy || invoice.createdBy,
       product: product._id,
+      salesDocument: invoice._id,
+      documentType: invoice.documentType || 'invoice',
+      documentNumber: invoice.documentNumber || invoice.invoiceNumber,
       invoice: invoice._id,
       invoiceNumber: invoice.invoiceNumber,
       type,
@@ -232,15 +307,30 @@ export const stockAdjustmentsForInvoice = async (invoice, direction = -1) => {
       stockBefore,
       stockAfter,
       note:
-        type === 'oversell'
+        stockBefore < adjustment.quantity && direction < 0
           ? `Invoice ${invoice.invoiceNumber} sold more than app stock`
           : `Invoice ${invoice.invoiceNumber}`
+    }], { session });
+    movements.push({
+      movementId: movement._id,
+      productId: product._id,
+      productName: product.name,
+      stockBefore,
+      stockAfter,
+      quantityChange,
+      lowStockThreshold: product.lowStockThreshold,
+      documentId: invoice._id,
+      documentNumber: invoice.documentNumber || invoice.invoiceNumber,
+      documentType: invoice.documentType || 'invoice',
+      movementType: type
     });
   }
+
+  return movements;
 };
 
-export const getInvoiceForUser = async (userId, invoiceId) => {
-  const invoice = await Invoice.findOne({ _id: invoiceId, user: userId });
+export const getInvoiceForBusiness = async (businessId, invoiceId, { session } = {}) => {
+  const invoice = await Invoice.findOne({ _id: invoiceId, business: businessId, documentType: 'invoice' }).session(session || null);
 
   if (!invoice) {
     throw new ApiError(404, 'Invoice not found');

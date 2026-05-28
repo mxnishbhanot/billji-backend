@@ -2,6 +2,7 @@ import http from 'http';
 import app from './app.js';
 import { connectDB } from './config/db.js';
 import { env } from './config/env.js';
+import { startOutboxDispatcher } from './services/eventDispatcher.js';
 import { initSocket } from './services/socketService.js';
 
 const startServer = async () => {
@@ -9,6 +10,7 @@ const startServer = async () => {
     await connectDB();
     const server = http.createServer(app);
     initSocket(server);
+    startOutboxDispatcher();
 
     server.listen(env.port, () => {
       console.log(`QuickInvoice API running on port ${env.port}`);

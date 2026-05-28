@@ -1,5 +1,16 @@
 import Invoice from '../models/Invoice.js';
 
+const SUMMARY_CACHE_TTL_MS = 30 * 1000;
+const summaryCache = new Map();
+
+export const invalidateReportSummaryCache = (businessId) => {
+  if (businessId) {
+    summaryCache.delete(String(businessId));
+  } else {
+    summaryCache.clear();
+  }
+};
+
 const parseDateParam = (value) => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const [year, month, day] = value.split('-').map(Number);
@@ -20,19 +31,28 @@ const buildDateFilter = ({ from, to } = {}) => {
   return filter;
 };
 
-export const getReportSummary = async (userId, range = {}) => {
+export const getReportSummary = async (businessId, range = {}) => {
+  const rangeKey = range.from || range.to ? null : String(businessId);
+  if (rangeKey) {
+    const cached = summaryCache.get(rangeKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+  }
+
   const now = new Date();
   const todayStart = startOfDay(now);
   const tomorrow = addDays(todayStart, 1);
   const weekStart = addDays(todayStart, -6);
   const monthStart = startOfMonth(now);
   const rangeDateFilter = buildDateFilter(range);
-  const baseFilter = rangeDateFilter ? { user: userId, date: rangeDateFilter } : { user: userId };
-  const rangePaidFilter = { ...baseFilter, status: 'paid' };
-  const trendFilter = rangeDateFilter ? rangePaidFilter : { user: userId, status: 'paid', date: { $gte: weekStart, $lt: tomorrow } };
+  const activeDocumentFilter = { documentStatus: { $nin: ['cancelled', 'void'] } };
+  const baseFilter = rangeDateFilter ? { business: businessId, documentType: 'invoice', date: rangeDateFilter } : { business: businessId, documentType: 'invoice' };
+  const rangePaidFilter = { ...baseFilter, ...activeDocumentFilter, paymentStatus: 'paid' };
+  const trendFilter = rangeDateFilter ? rangePaidFilter : { business: businessId, documentType: 'invoice', ...activeDocumentFilter, paymentStatus: 'paid', date: { $gte: weekStart, $lt: tomorrow } };
   const rangeLabel = rangeDateFilter ? 'Selected range' : 'Last 7 days';
 
-  const paidFilter = { user: userId, status: 'paid' };
+  const paidFilter = { business: businessId, documentType: 'invoice', ...activeDocumentFilter, paymentStatus: 'paid' };
 
   const [today, weekly, monthly, rangeSales, counts, topProducts, trend, recentInvoices] = await Promise.all([
     Invoice.aggregate([
@@ -62,7 +82,7 @@ export const getReportSummary = async (userId, range = {}) => {
       }
     ]),
     Invoice.aggregate([
-      { $match: { ...baseFilter, status: { $ne: 'cancelled' } } },
+      { $match: { ...baseFilter, ...activeDocumentFilter } },
       { $unwind: '$items' },
       {
         $group: {
@@ -85,14 +105,14 @@ export const getReportSummary = async (userId, range = {}) => {
       },
       { $sort: { _id: 1 } }
     ]),
-    Invoice.find(baseFilter).sort({ createdAt: -1 }).limit(5)
+    Invoice.find(baseFilter).sort({ createdAt: -1 }).limit(5).lean()
   ]);
 
   const totalInvoices = counts.reduce((sum, item) => sum + item.count, 0);
   const totalValue = counts.reduce((sum, item) => sum + item.value, 0);
   const pending = counts.find((item) => item._id === 'pending')?.count || 0;
 
-  return {
+  const result = {
     todaySales: today[0]?.total || 0,
     weeklySales: weekly[0]?.total || 0,
     monthlySales: monthly[0]?.total || 0,
@@ -106,4 +126,10 @@ export const getReportSummary = async (userId, range = {}) => {
     salesTrend: trend.map((item) => ({ date: item._id, sales: item.sales, invoices: item.invoices })),
     recentInvoices
   };
+
+  if (rangeKey) {
+    summaryCache.set(rangeKey, { value: result, expiresAt: Date.now() + SUMMARY_CACHE_TTL_MS });
+  }
+
+  return result;
 };
