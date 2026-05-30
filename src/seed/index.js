@@ -11,7 +11,21 @@ import { buildInvoicePayload, setInvoicePdfUrl, stockAdjustmentsForInvoice } fro
 const seed = async () => {
   await connectDB();
 
-  await Promise.all([User.deleteMany({ email: 'demo@quickinvoice.app' })]);
+  // Idempotent seed: clear any prior demo data so re-running does not collide
+  // on unique indexes or accumulate duplicates.
+  const existing = await User.findOne({ email: 'demo@quickinvoice.app' });
+  if (existing) {
+    const businesses = await Business.find({ owner: existing._id }).select('_id');
+    const businessIds = businesses.map((b) => b._id);
+    await Promise.all([
+      Invoice.deleteMany({ business: { $in: businessIds } }),
+      Product.deleteMany({ business: { $in: businessIds } }),
+      Customer.deleteMany({ business: { $in: businessIds } }),
+      BusinessMember.deleteMany({ business: { $in: businessIds } }),
+      Business.deleteMany({ owner: existing._id }),
+      User.deleteOne({ _id: existing._id })
+    ]);
+  }
 
   const user = await User.create({
     name: 'Demo Owner',

@@ -173,6 +173,7 @@ export const recordInvoicePaymentWorkflow = ({ req }) =>
         payload: {
           paymentId: payment._id,
           invoiceId: invoice._id,
+          sourceOrder: invoice.sourceOrder || null,
           invoiceNumber: invoice.invoiceNumber,
           customerId,
           customerName: invoice.customerSnapshot?.name,

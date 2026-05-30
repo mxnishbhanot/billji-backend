@@ -3,6 +3,7 @@ import { emitBusinessEvent } from './socketService.js';
 import { DOMAIN_EVENTS } from './eventBus.js';
 import { projectNotificationsForEvent } from './notificationService.js';
 import { invalidateReportSummaryCache } from './reportService.js';
+import { recomputeOrderCacheForEvent } from '../modules/orders/paymentCache.js';
 
 const MAX_ATTEMPTS = 5;
 
@@ -23,11 +24,26 @@ const REPORT_INVALIDATING_EVENTS = new Set([
   DOMAIN_EVENTS.paymentRecorded
 ]);
 
+// OR-3: events that may change an order's derived payment view. Each carries the
+// invoice's sourceOrder in its payload, so the order cache refreshes even if the
+// invoice has since been hard-deleted.
+const ORDER_RECOMPUTE_EVENTS = new Set([
+  DOMAIN_EVENTS.documentIssued,
+  DOMAIN_EVENTS.documentCancelled,
+  DOMAIN_EVENTS.paymentRecorded
+]);
+
 export const dispatchOutboxEvent = async (event) => {
   await projectNotificationsForEvent(event);
 
   if (REPORT_INVALIDATING_EVENTS.has(event.eventType)) {
     invalidateReportSummaryCache(event.business);
+  }
+
+  if (ORDER_RECOMPUTE_EVENTS.has(event.eventType)) {
+    const invoiceId = event.payload?.invoiceId
+      || (event.aggregateType === 'sales_document' ? event.aggregateId : null);
+    await recomputeOrderCacheForEvent(event.business, { orderId: event.payload?.sourceOrder, invoiceId });
   }
 
   const socketEvents = SOCKET_EVENTS_BY_DOMAIN_EVENT[event.eventType] || [];

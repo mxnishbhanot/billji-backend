@@ -3,7 +3,7 @@ import { DOMAIN_EVENTS, publishDomainEvent } from '../../services/eventBus.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { createInvoiceRecord, deleteInvoiceRecord } from './repository.js';
 
-const publishInvoiceIssuedEvent = (req, invoice, { session, suffix = 'issued' } = {}) =>
+export const publishInvoiceIssuedEvent = (req, invoice, { session, suffix = 'issued' } = {}) =>
   publishDomainEvent(
     {
       business: req.business._id,
@@ -15,6 +15,8 @@ const publishInvoiceIssuedEvent = (req, invoice, { session, suffix = 'issued' } 
         documentType: invoice.documentType || 'invoice',
         documentNumber: invoice.documentNumber || invoice.invoiceNumber,
         invoiceNumber: invoice.invoiceNumber,
+        invoiceId: invoice._id,
+        sourceOrder: invoice.sourceOrder || null,
         customerId: invoice.customer,
         customerName: invoice.customerSnapshot?.name,
         total: invoice.total,
@@ -37,6 +39,8 @@ const publishInvoiceCancelledEvent = (req, invoice, { session, suffix = 'cancell
         documentType: invoice.documentType || 'invoice',
         documentNumber: invoice.documentNumber || invoice.invoiceNumber,
         invoiceNumber: invoice.invoiceNumber,
+        invoiceId: invoice._id,
+        sourceOrder: invoice.sourceOrder || null,
         customerId: invoice.customer,
         customerName: invoice.customerSnapshot?.name,
         total: invoice.total
@@ -46,7 +50,7 @@ const publishInvoiceCancelledEvent = (req, invoice, { session, suffix = 'cancell
     { session }
   );
 
-const publishStockAdjustedEvents = (req, movements, { session } = {}) =>
+export const publishStockAdjustedEvents = (req, movements, { session } = {}) =>
   Promise.all(
     movements.map((movement) =>
       publishDomainEvent(

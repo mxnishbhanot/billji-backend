@@ -78,6 +78,8 @@ export const salesDocumentSchema = new mongoose.Schema(
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     customer: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null, index: true },
+    // OR-0: nullable link to source Order. Null = direct invoice (legacy flow). Ref is 1->N; service enforces 1->1.
+    sourceOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', default: null, index: true },
     documentType: { type: String, enum: SALES_DOCUMENT_TYPES, default: 'invoice', required: true, index: true },
     documentNumber: { type: String, required: true, trim: true },
     invoiceNumber: { type: String, trim: true },

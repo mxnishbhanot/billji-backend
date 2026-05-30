@@ -22,7 +22,9 @@ const stockMovementSchema = new mongoose.Schema(
         'stock_correction',
         'initial_stock',
         'oversell',
-        'invoice_deleted'
+        'invoice_deleted',
+        'reservation',
+        'reservation_released'
       ],
       required: true
     },
