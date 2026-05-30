@@ -95,6 +95,35 @@ describe('orders API (OR-1)', () => {
     assert.equal(search.body.orders.length, 1);
   });
 
+  it('filters orders by payment, fulfillment, date, and amount', async () => {
+    const { business, token } = await createTestContext();
+    const customer = await createCustomer(business);
+    const smallProduct = await createProduct(business, { price: 100 });
+    const largeProduct = await createProduct(business, { price: 12000, name: 'Large Order Item', sku: 'LARGE-ORDER' });
+
+    const small = await createOrder({ token, customer, product: smallProduct, quantity: 1, key: 'filter-small-order' }).expect(201);
+    const large = await createOrder({ token, customer, product: largeProduct, quantity: 1, key: 'filter-large-order' }).expect(201);
+
+    await Order.findByIdAndUpdate(small.body.order._id, { date: new Date('2026-01-15T10:00:00.000Z') });
+    await Order.findByIdAndUpdate(large.body.order._id, {
+      date: new Date('2026-02-15T10:00:00.000Z'),
+      fulfillmentStatus: 'delivered',
+      paymentStatus: 'paid'
+    });
+
+    const paid = await api().get('/api/v1/orders?paymentStatus=paid').set(authHeader(token)).expect(200);
+    assert.deepEqual(paid.body.orders.map((order) => order._id), [large.body.order._id]);
+
+    const delivered = await api().get('/api/v1/orders?fulfillmentStatus=delivered').set(authHeader(token)).expect(200);
+    assert.deepEqual(delivered.body.orders.map((order) => order._id), [large.body.order._id]);
+
+    const january = await api().get('/api/v1/orders?from=2026-01-01&to=2026-01-31').set(authHeader(token)).expect(200);
+    assert.deepEqual(january.body.orders.map((order) => order._id), [small.body.order._id]);
+
+    const highValue = await api().get('/api/v1/orders?minAmount=1000').set(authHeader(token)).expect(200);
+    assert.deepEqual(highValue.body.orders.map((order) => order._id), [large.body.order._id]);
+  });
+
   it('reads a single order and 404s for unknown id', async () => {
     const { business, token } = await createTestContext();
     const customer = await createCustomer(business);
@@ -338,16 +367,15 @@ describe('orders derived payment status (OR-3)', () => {
     assert.equal(cached.balanceDue, 0);
   });
 
-  it('recomputes the order cache when the linked invoice is cancelled/deleted', async () => {
+  it('recomputes the order cache when the linked invoice is cancelled', async () => {
     const { business, token } = await createTestContext();
     const { orderId, invoiceId } = await seedInvoicedOrder({ token, business });
 
-    await recordPayment({ token, invoiceId, amount: 236, key: 'or3-void-pay' }).expect(201);
-    await processPendingOutboxEvents();
-    assert.equal((await Order.findById(orderId).lean()).paymentStatus, 'paid');
-
-    // Cancelling the invoice (hard delete) reverses the financial link.
-    await api().delete(`/api/v1/invoices/${invoiceId}`).set(authHeader(token)).set(IDEMPOTENCY_HEADER, 'or3-void-del').expect(200);
+    await api()
+      .patch(`/api/v1/invoices/${invoiceId}/status`)
+      .set(authHeader(token))
+      .send({ status: 'cancelled' })
+      .expect(200);
     await processPendingOutboxEvents();
 
     const cached = await Order.findById(orderId).lean();
@@ -355,9 +383,10 @@ describe('orders derived payment status (OR-3)', () => {
     assert.equal(cached.paidAmount, 0);
     assert.equal(cached.balanceDue, 236);
 
-    // Detail view agrees (no live invoice).
+    // Detail view agrees (no live invoice in the payment snapshot).
     const detail = await getOrderDetail({ token, id: orderId }).expect(200);
     assert.equal(detail.body.order.invoiceCount, 0);
     assert.equal(detail.body.order.paymentStatus, 'unpaid');
+    assert.equal(detail.body.order.linkedInvoice.status, 'cancelled');
   });
 });

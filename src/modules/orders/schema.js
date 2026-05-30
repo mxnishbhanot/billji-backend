@@ -1,5 +1,5 @@
 import { body, query } from 'express-validator';
-import { ORDER_STATUSES } from '../../models/Order.js';
+import { ORDER_FULFILLMENT_STATUSES, ORDER_PAYMENT_STATUSES, ORDER_STATUSES } from '../../models/Order.js';
 
 export const ORDER_SORT_OPTIONS = {
   newest: { date: -1, createdAt: -1 },
@@ -26,7 +26,13 @@ export const orderRules = [
 export const orderQueryRules = [
   query('search').optional({ checkFalsy: true }).trim().isLength({ max: 80 }),
   query('orderStatus').optional({ checkFalsy: true }).isIn(ORDER_STATUSES).withMessage('Invalid order status'),
+  query('paymentStatus').optional({ checkFalsy: true }).isIn(ORDER_PAYMENT_STATUSES).withMessage('Invalid payment status'),
+  query('fulfillmentStatus').optional({ checkFalsy: true }).isIn(ORDER_FULFILLMENT_STATUSES).withMessage('Invalid fulfillment status'),
   query('customerId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid customerId'),
+  query('from').optional({ checkFalsy: true }).isISO8601(),
+  query('to').optional({ checkFalsy: true }).isISO8601(),
+  query('minAmount').optional({ checkFalsy: true }).isFloat({ min: 0 }).withMessage('minAmount must be a positive number'),
+  query('maxAmount').optional({ checkFalsy: true }).isFloat({ min: 0 }).withMessage('maxAmount must be a positive number'),
   query('sort').optional({ checkFalsy: true }).isIn(Object.keys(ORDER_SORT_OPTIONS)).withMessage('Invalid sort option'),
   query('page').optional({ checkFalsy: true }).isInt({ min: 1 }).withMessage('Page must be 1 or greater'),
   query('limit').optional({ checkFalsy: true }).isInt({ min: 1, max: 50 }).withMessage('Limit must be between 1 and 50')
