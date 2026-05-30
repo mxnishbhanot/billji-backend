@@ -1,21 +1,24 @@
 import { body, query } from 'express-validator';
+import crypto from 'crypto';
 import Invoice from '../models/Invoice.js';
+import { createInvoiceWorkflow, deleteInvoiceWorkflow, duplicateInvoiceWorkflow } from '../modules/invoices/service.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import {
-  buildInvoicePayload,
   buildInvoiceShareMessage,
   buildPublicInvoicePdfUrl,
   buildWhatsAppLink,
-  getInvoiceForUser,
-  serializeInvoice,
-  setInvoicePdfUrl,
-  stockAdjustmentsForInvoice
+  getInvoiceForBusiness,
+  serializeInvoice
 } from '../services/invoiceService.js';
 import { sendInvoiceEmail } from '../services/emailService.js';
 import { generateInvoicePdf } from '../services/pdfService.js';
-import { emitUserEvent } from '../services/socketService.js';
-import { paginateQuery, wantsPagination } from '../utils/pagination.js';
+import { DOMAIN_EVENTS, publishDomainEvent } from '../services/eventBus.js';
+import { resolveInvoiceReminderNotifications } from '../services/notificationService.js';
+import { emitBusinessEvent } from '../services/socketService.js';
+import { logAudit } from '../services/auditService.js';
+import { paginateQuery, UNPAGINATED_LIST_CAP, wantsPagination } from '../utils/pagination.js';
+import { buildSearchRegex } from '../utils/searchRegex.js';
 
 const parseDateParam = (value) => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -65,7 +68,7 @@ export const invoiceQueryRules = [
 
 export const listInvoices = asyncHandler(async (req, res) => {
   const { search = '', status, from, to, minAmount, maxAmount, sort } = req.query;
-  const filter = { user: req.user._id };
+  const filter = { business: req.business._id, documentType: 'invoice' };
 
   if (status) {
     filter.status = status;
@@ -83,47 +86,45 @@ export const listInvoices = asyncHandler(async (req, res) => {
     if (maxAmount) filter.total.$lte = Number(maxAmount);
   }
 
-  if (search) {
+  const searchRegex = buildSearchRegex(search);
+  if (searchRegex) {
     filter.$or = [
-      { invoiceNumber: { $regex: search, $options: 'i' } },
-      { 'customerSnapshot.name': { $regex: search, $options: 'i' } },
-      { 'customerSnapshot.phone': { $regex: search, $options: 'i' } }
+      { invoiceNumber: searchRegex },
+      { 'customerSnapshot.name': searchRegex },
+      { 'customerSnapshot.phone': searchRegex }
     ];
   }
 
   const sortSpec = SORT_OPTIONS[sort] || SORT_OPTIONS.newest;
-  const query = Invoice.find(filter).sort(sortSpec);
+  const query = Invoice.find(filter).sort(sortSpec).lean();
 
   if (wantsPagination(req.query)) {
     const { items, pagination } = await paginateQuery(query, Invoice.countDocuments(filter), req.query);
     return res.json({ success: true, invoices: items.map((invoice) => serializeInvoice(invoice, req)), pagination });
   }
 
-  const invoices = await query;
+  const invoices = await query.limit(UNPAGINATED_LIST_CAP);
   res.json({ success: true, invoices: invoices.map((invoice) => serializeInvoice(invoice, req)) });
 });
 
-const emitInvoiceChanges = (userId, reason, { stockChanged = false } = {}) => {
-  emitUserEvent(userId, 'invoices:changed', { reason });
-  emitUserEvent(userId, 'notifications:changed', { reason });
+const emitInvoiceChanges = (businessId, reason, { stockChanged = false } = {}) => {
+  emitBusinessEvent(businessId, 'invoices:changed', { reason });
+  emitBusinessEvent(businessId, 'notifications:changed', { reason });
 
   if (stockChanged) {
-    emitUserEvent(userId, 'products:changed', { reason });
+    emitBusinessEvent(businessId, 'products:changed', { reason });
   }
 };
 
 export const createInvoice = asyncHandler(async (req, res) => {
-  const payload = await buildInvoicePayload(req.user, req.body);
-  const invoice = await Invoice.create(payload);
-  await setInvoicePdfUrl(invoice, req);
-  await stockAdjustmentsForInvoice(invoice, -1);
+  const invoice = await createInvoiceWorkflow({ req });
 
-  emitInvoiceChanges(req.user._id, 'invoice_created', { stockChanged: true });
+  void logAudit(req, { action: 'invoice.created', resourceType: 'invoice', resourceId: invoice._id, metadata: { invoiceNumber: invoice.invoiceNumber, total: invoice.total } });
   res.status(201).json({ success: true, invoice: serializeInvoice(invoice, req) });
 });
 
 export const getInvoice = asyncHandler(async (req, res) => {
-  const invoice = await getInvoiceForUser(req.user._id, req.params.id);
+  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
   res.json({ success: true, invoice: serializeInvoice(invoice, req) });
 });
 
@@ -134,52 +135,57 @@ export const updateInvoiceStatus = asyncHandler(async (req, res) => {
     throw new ApiError(422, 'Invalid invoice status');
   }
 
-  const invoice = await getInvoiceForUser(req.user._id, req.params.id);
+  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
   invoice.status = status;
+  invoice.paidAmount = status === 'paid' ? invoice.total : 0;
+  invoice.balanceDue = status === 'paid' ? 0 : invoice.total;
+  invoice.updatedBy = req.user._id;
   await invoice.save();
 
-  emitInvoiceChanges(req.user._id, 'invoice_status_updated');
+  if (status === 'cancelled') {
+    await publishDomainEvent({
+      business: req.business._id,
+      actor: req.user._id,
+      eventType: DOMAIN_EVENTS.documentCancelled,
+      aggregateType: 'sales_document',
+      aggregateId: invoice._id,
+      payload: {
+        documentType: invoice.documentType || 'invoice',
+        documentNumber: invoice.documentNumber || invoice.invoiceNumber,
+        invoiceNumber: invoice.invoiceNumber,
+        customerId: invoice.customer,
+        customerName: invoice.customerSnapshot?.name,
+        total: invoice.total
+      },
+      dedupeKey: `${DOMAIN_EVENTS.documentCancelled}:${invoice._id}:status`
+    });
+  } else {
+    if (status === 'paid') {
+      await resolveInvoiceReminderNotifications(req.business._id, invoice._id);
+    }
+    emitInvoiceChanges(req.business._id, 'invoice_status_updated');
+  }
+  void logAudit(req, { action: 'invoice.status_updated', resourceType: 'invoice', resourceId: invoice._id, metadata: { status } });
   res.json({ success: true, invoice: serializeInvoice(invoice, req) });
 });
 
 export const duplicateInvoice = asyncHandler(async (req, res) => {
-  const invoice = await getInvoiceForUser(req.user._id, req.params.id);
-  const payload = await buildInvoicePayload(req.user, {
-    customerId: invoice.customer,
-    customer: invoice.customerSnapshot,
-    items: invoice.items.map((item) => ({
-      productId: item.product,
-      name: item.name,
-      quantity: item.quantity,
-      price: item.price,
-      sku: item.sku
-    })),
-    taxRate: invoice.tax.rate,
-    discountType: invoice.discount.type,
-    discountValue: invoice.discount.value,
-    status: 'pending',
-    notes: invoice.notes
-  });
-  const clone = await Invoice.create(payload);
-  await setInvoicePdfUrl(clone, req);
-  await stockAdjustmentsForInvoice(clone, -1);
+  const clone = await duplicateInvoiceWorkflow({ req });
 
-  emitInvoiceChanges(req.user._id, 'invoice_duplicated', { stockChanged: true });
+  void logAudit(req, { action: 'invoice.duplicated', resourceType: 'invoice', resourceId: clone._id, metadata: { sourceInvoiceId: req.params.id } });
   res.status(201).json({ success: true, invoice: serializeInvoice(clone, req) });
 });
 
 export const deleteInvoice = asyncHandler(async (req, res) => {
-  const invoice = await getInvoiceForUser(req.user._id, req.params.id);
-  await stockAdjustmentsForInvoice(invoice, 1);
-  await invoice.deleteOne();
+  const invoice = await deleteInvoiceWorkflow({ req });
 
-  emitInvoiceChanges(req.user._id, 'invoice_deleted', { stockChanged: true });
+  void logAudit(req, { action: 'invoice.deleted', resourceType: 'invoice', resourceId: invoice._id, metadata: { invoiceNumber: invoice.invoiceNumber } });
   res.json({ success: true, message: 'Invoice deleted' });
 });
 
 export const downloadInvoicePdf = asyncHandler(async (req, res) => {
-  const invoice = await getInvoiceForUser(req.user._id, req.params.id);
-  const pdf = await generateInvoicePdf(invoice, req.user);
+  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
+  const pdf = await generateInvoicePdf(invoice, req.business);
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${invoice.invoiceNumber}.pdf"`);
@@ -187,13 +193,21 @@ export const downloadInvoicePdf = asyncHandler(async (req, res) => {
 });
 
 export const publicInvoicePdf = asyncHandler(async (req, res) => {
-  const invoice = await Invoice.findOne({ _id: req.params.id, shareToken: req.params.token }).populate('user');
+  const invoice = await Invoice.findOne({ _id: req.params.id, shareToken: req.params.token, documentType: 'invoice' }).populate('business');
 
   if (!invoice) {
     throw new ApiError(404, 'Invoice not found');
   }
 
-  const pdf = await generateInvoicePdf(invoice, invoice.user);
+  if (invoice.business?.status && invoice.business.status !== 'active') {
+    throw new ApiError(404, 'Invoice not found');
+  }
+
+  if (invoice.shareRevokedAt || (invoice.shareExpiresAt && invoice.shareExpiresAt < new Date())) {
+    throw new ApiError(410, 'Invoice link has expired');
+  }
+
+  const pdf = await generateInvoicePdf(invoice, invoice.business);
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="${invoice.invoiceNumber}.pdf"`);
@@ -201,7 +215,7 @@ export const publicInvoicePdf = asyncHandler(async (req, res) => {
 });
 
 export const whatsappInvoice = asyncHandler(async (req, res) => {
-  const invoice = await getInvoiceForUser(req.user._id, req.params.id);
+  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
   res.json({
     success: true,
     link: buildWhatsAppLink(invoice, req),
@@ -210,8 +224,47 @@ export const whatsappInvoice = asyncHandler(async (req, res) => {
 });
 
 export const emailInvoice = asyncHandler(async (req, res) => {
-  const invoice = await getInvoiceForUser(req.user._id, req.params.id);
-  const result = await sendInvoiceEmail({ invoice, user: req.user, to: req.body.email, pdfUrl: buildPublicInvoicePdfUrl(invoice, req) });
+  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
+  const result = await sendInvoiceEmail({ invoice, business: req.business, to: req.body.email, pdfUrl: buildPublicInvoicePdfUrl(invoice, req) });
+  await publishDomainEvent({
+    business: req.business._id,
+    actor: req.user._id,
+    eventType: DOMAIN_EVENTS.documentShared,
+    aggregateType: 'sales_document',
+    aggregateId: invoice._id,
+    payload: {
+      documentType: invoice.documentType || 'invoice',
+      documentNumber: invoice.documentNumber || invoice.invoiceNumber,
+      invoiceNumber: invoice.invoiceNumber,
+      customerId: invoice.customer,
+      customerName: invoice.customerSnapshot?.name,
+      recipient: result.recipient,
+      channel: 'email'
+    },
+    dedupeKey: `${DOMAIN_EVENTS.documentShared}:${invoice._id}:email:${result.recipient}`
+  });
 
   res.json({ success: true, message: `Invoice sent to ${result.recipient}` });
+});
+
+export const rotateInvoiceShareLink = asyncHandler(async (req, res) => {
+  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
+  invoice.shareToken = crypto.randomBytes(24).toString('hex');
+  invoice.shareExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  invoice.shareRevokedAt = null;
+  invoice.updatedBy = req.user._id;
+  await invoice.save();
+
+  void logAudit(req, { action: 'invoice.share_rotated', resourceType: 'invoice', resourceId: invoice._id });
+  res.json({ success: true, invoice: serializeInvoice(invoice, req) });
+});
+
+export const revokeInvoiceShareLink = asyncHandler(async (req, res) => {
+  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
+  invoice.shareRevokedAt = new Date();
+  invoice.updatedBy = req.user._id;
+  await invoice.save();
+
+  void logAudit(req, { action: 'invoice.share_revoked', resourceType: 'invoice', resourceId: invoice._id });
+  res.json({ success: true, invoice: serializeInvoice(invoice, req) });
 });

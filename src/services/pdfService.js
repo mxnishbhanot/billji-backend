@@ -121,11 +121,11 @@ const drawTableHeader = (doc, y) => {
   doc.text('TOTAL', 458, y + 12, { width: 74, align: 'right' });
 };
 
-export const generateInvoicePdf = (invoice, user) =>
+export const generateInvoicePdf = (invoice, businessContext) =>
   new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 48, size: 'A4' });
     const chunks = [];
-    const business = user.businessProfile || {};
+    const business = businessContext?.businessProfile || businessContext || {};
 
     doc.on('data', (chunk) => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));

@@ -1,5 +1,7 @@
 export const wantsPagination = (query = {}) => Boolean(query.paginated || query.page || query.limit);
 
+export const UNPAGINATED_LIST_CAP = 200;
+
 export const getPagination = (query = {}, { defaultLimit = 10, maxLimit = 50 } = {}) => {
   const page = Math.max(Number(query.page || 1), 1);
   const limit = Math.min(Math.max(Number(query.limit || defaultLimit), 1), maxLimit);

@@ -3,7 +3,7 @@ import { createTransporter } from '../config/mailer.js';
 import { ApiError } from '../utils/ApiError.js';
 import { generateInvoicePdf } from './pdfService.js';
 
-export const sendInvoiceEmail = async ({ invoice, user, to, pdfUrl }) => {
+export const sendInvoiceEmail = async ({ invoice, business, to, pdfUrl }) => {
   const recipient = to || invoice.customerSnapshot.email;
 
   if (!recipient) {
@@ -16,12 +16,12 @@ export const sendInvoiceEmail = async ({ invoice, user, to, pdfUrl }) => {
     throw new ApiError(503, 'Email service is not configured');
   }
 
-  const pdf = await generateInvoicePdf(invoice, user);
+  const pdf = await generateInvoicePdf(invoice, business);
 
   await transporter.sendMail({
     from: env.smtp.from,
     to: recipient,
-    subject: `Invoice ${invoice.invoiceNumber} from ${user.businessProfile?.businessName || 'QuickInvoice'}`,
+    subject: `Invoice ${invoice.invoiceNumber} from ${business?.businessName || 'QuickInvoice'}`,
     text: `Hello ${invoice.customerSnapshot.name}, your invoice is attached. You can also download it here: ${pdfUrl || invoice.pdfUrl}`,
     attachments: [
       {

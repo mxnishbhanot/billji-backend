@@ -11,6 +11,6 @@ export const reportQueryRules = [
 ];
 
 export const summary = asyncHandler(async (req, res) => {
-  const report = await getReportSummary(req.user._id, { from: req.query.from, to: req.query.to });
+  const report = await getReportSummary(req.business._id, { from: req.query.from, to: req.query.to });
   res.json({ success: true, report });
 });
