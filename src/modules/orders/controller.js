@@ -17,18 +17,48 @@ export const serializeOrder = (order) => {
   return { ...data, paidAmount, balanceDue };
 };
 
+const parseDateParam = (value) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }
+  return new Date(value);
+};
+const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+const endOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+
 const emitOrderChanges = (businessId, reason) => emitBusinessEvent(businessId, 'orders:changed', { reason });
 
 export const listOrders = asyncHandler(async (req, res) => {
-  const { search = '', orderStatus, customerId, sort } = req.query;
+  const { search = '', orderStatus, paymentStatus, fulfillmentStatus, customerId, from, to, minAmount, maxAmount, sort } = req.query;
   const filter = { business: req.business._id };
 
   if (orderStatus) {
     filter.orderStatus = orderStatus;
   }
 
+  if (paymentStatus) {
+    filter.paymentStatus = paymentStatus;
+  }
+
+  if (fulfillmentStatus) {
+    filter.fulfillmentStatus = fulfillmentStatus;
+  }
+
   if (customerId) {
     filter.customer = customerId;
+  }
+
+  if (from || to) {
+    filter.date = {};
+    if (from) filter.date.$gte = startOfDay(parseDateParam(from));
+    if (to) filter.date.$lte = endOfDay(parseDateParam(to));
+  }
+
+  if (minAmount || maxAmount) {
+    filter.total = {};
+    if (minAmount) filter.total.$gte = Number(minAmount);
+    if (maxAmount) filter.total.$lte = Number(maxAmount);
   }
 
   const searchRegex = buildSearchRegex(search);

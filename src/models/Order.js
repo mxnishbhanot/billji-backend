@@ -85,6 +85,9 @@ const orderSchema = new mongoose.Schema(
 );
 
 orderSchema.index({ business: 1, orderStatus: 1, createdAt: -1 });
+orderSchema.index({ business: 1, paymentStatus: 1, date: -1 });
+orderSchema.index({ business: 1, fulfillmentStatus: 1, date: -1 });
+orderSchema.index({ business: 1, date: -1 });
 orderSchema.index({ business: 1, customer: 1, createdAt: -1 });
 orderSchema.index({ business: 1, orderNumber: 1 }, { unique: true });
 

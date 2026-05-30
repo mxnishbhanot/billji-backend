@@ -1,5 +1,9 @@
 import { buildInvoicePayload, getInvoiceForBusiness, setInvoicePdfUrl, stockAdjustmentsForInvoice } from '../../services/invoiceService.js';
 import { DOMAIN_EVENTS, publishDomainEvent } from '../../services/eventBus.js';
+import Payment from '../../models/Payment.js';
+import { domainStatusesForLegacy } from '../../models/SalesDocument.js';
+import { customerBalanceTotals, updateCustomerBalance } from '../payments/repository.js';
+import { ApiError } from '../../utils/ApiError.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { createInvoiceRecord, deleteInvoiceRecord } from './repository.js';
 
@@ -110,15 +114,61 @@ export const duplicateInvoiceWorkflow = ({ req }) =>
     return clone;
   });
 
-export const deleteInvoiceWorkflow = ({ req }) =>
+const assertInvoiceHasNoPayments = async (invoice, action, { session } = {}) => {
+  const payment = await Payment.exists({ business: invoice.business, invoice: invoice._id }).session(session || null);
+  if (payment) {
+    throw new ApiError(409, `Invoice has recorded payments and cannot be ${action}`, {
+      code: 'INVOICE_HAS_PAYMENTS'
+    });
+  }
+};
+
+const refreshCustomerBalanceForInvoice = async (req, invoice, { session } = {}) => {
+  if (!invoice.customer) return null;
+  const totals = await customerBalanceTotals(req.business._id, invoice.customer, { session });
+  return updateCustomerBalance(req.business._id, invoice.customer, totals, { session, actorId: req.user._id });
+};
+
+export const cancelInvoiceWorkflow = ({ req }) =>
   withTransaction(async (session) => {
     const invoice = await getInvoiceForBusiness(req.business._id, req.params.id, { session });
 
+    if (invoice.documentStatus === 'cancelled' || invoice.status === 'cancelled') {
+      return invoice;
+    }
+
+    await assertInvoiceHasNoPayments(invoice, 'cancelled', { session });
+
     invoice.updatedBy = req.user._id;
+    invoice.status = 'cancelled';
+    const domainStatuses = domainStatusesForLegacy('cancelled');
+    invoice.documentStatus = domainStatuses.documentStatus;
+    invoice.paymentStatus = domainStatuses.paymentStatus;
+    invoice.paidAmount = 0;
+    invoice.balanceDue = 0;
+
     const movements = await stockAdjustmentsForInvoice(invoice, 1, { session });
+    await invoice.save({ session });
+    await refreshCustomerBalanceForInvoice(req, invoice, { session });
+    await publishInvoiceCancelledEvent(req, invoice, { session });
+    await publishStockAdjustedEvents(req, movements, { session });
+
+    return invoice;
+  });
+
+export const deleteInvoiceWorkflow = ({ req }) =>
+  withTransaction(async (session) => {
+    const invoice = await getInvoiceForBusiness(req.business._id, req.params.id, { session });
+    const isAlreadyCancelled = invoice.documentStatus === 'cancelled' || invoice.status === 'cancelled';
+
+    await assertInvoiceHasNoPayments(invoice, 'deleted', { session });
+
+    invoice.updatedBy = req.user._id;
+    const movements = isAlreadyCancelled ? [] : await stockAdjustmentsForInvoice(invoice, 1, { session });
     await publishInvoiceCancelledEvent(req, invoice, { session, suffix: 'deleted' });
     await publishStockAdjustedEvents(req, movements, { session });
     await deleteInvoiceRecord(invoice, { session });
+    await refreshCustomerBalanceForInvoice(req, invoice, { session });
 
     return invoice;
   });

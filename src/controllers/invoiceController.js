@@ -1,7 +1,7 @@
 import { body, query } from 'express-validator';
 import crypto from 'crypto';
 import Invoice from '../models/Invoice.js';
-import { createInvoiceWorkflow, deleteInvoiceWorkflow, duplicateInvoiceWorkflow } from '../modules/invoices/service.js';
+import { cancelInvoiceWorkflow, createInvoiceWorkflow, deleteInvoiceWorkflow, duplicateInvoiceWorkflow } from '../modules/invoices/service.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import {
@@ -13,7 +13,6 @@ import {
 } from '../services/invoiceService.js';
 import { sendInvoiceEmail } from '../services/emailService.js';
 import { generateInvoicePdf } from '../services/pdfService.js';
-import { DOMAIN_EVENTS, publishDomainEvent } from '../services/eventBus.js';
 import { resolveInvoiceReminderNotifications } from '../services/notificationService.js';
 import { emitBusinessEvent } from '../services/socketService.js';
 import { logAudit } from '../services/auditService.js';
@@ -135,6 +134,12 @@ export const updateInvoiceStatus = asyncHandler(async (req, res) => {
     throw new ApiError(422, 'Invalid invoice status');
   }
 
+  if (status === 'cancelled') {
+    const invoice = await cancelInvoiceWorkflow({ req });
+    void logAudit(req, { action: 'invoice.status_updated', resourceType: 'invoice', resourceId: invoice._id, metadata: { status } });
+    return res.json({ success: true, invoice: serializeInvoice(invoice, req) });
+  }
+
   const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
   invoice.status = status;
   invoice.paidAmount = status === 'paid' ? invoice.total : 0;
@@ -142,29 +147,10 @@ export const updateInvoiceStatus = asyncHandler(async (req, res) => {
   invoice.updatedBy = req.user._id;
   await invoice.save();
 
-  if (status === 'cancelled') {
-    await publishDomainEvent({
-      business: req.business._id,
-      actor: req.user._id,
-      eventType: DOMAIN_EVENTS.documentCancelled,
-      aggregateType: 'sales_document',
-      aggregateId: invoice._id,
-      payload: {
-        documentType: invoice.documentType || 'invoice',
-        documentNumber: invoice.documentNumber || invoice.invoiceNumber,
-        invoiceNumber: invoice.invoiceNumber,
-        customerId: invoice.customer,
-        customerName: invoice.customerSnapshot?.name,
-        total: invoice.total
-      },
-      dedupeKey: `${DOMAIN_EVENTS.documentCancelled}:${invoice._id}:status`
-    });
-  } else {
-    if (status === 'paid') {
-      await resolveInvoiceReminderNotifications(req.business._id, invoice._id);
-    }
-    emitInvoiceChanges(req.business._id, 'invoice_status_updated');
+  if (status === 'paid') {
+    await resolveInvoiceReminderNotifications(req.business._id, invoice._id);
   }
+  emitInvoiceChanges(req.business._id, 'invoice_status_updated');
   void logAudit(req, { action: 'invoice.status_updated', resourceType: 'invoice', resourceId: invoice._id, metadata: { status } });
   res.json({ success: true, invoice: serializeInvoice(invoice, req) });
 });

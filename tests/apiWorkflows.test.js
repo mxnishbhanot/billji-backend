@@ -49,6 +49,60 @@ describe('invoice API quality coverage', () => {
     assert.equal(await Invoice.countDocuments({ business: business._id }), 1);
   });
 
+  it('cancels an unpaid invoice by restoring stock while preserving the invoice record', async () => {
+    const { business, token } = await createTestContext();
+    const customer = await createCustomer(business);
+    const product = await createProduct(business, { stockQuantity: 5, price: 120 });
+    const invoiceResponse = await createInvoice({ token, customer, product, quantity: 2, key: 'cancel-unpaid' }).expect(201);
+    const invoiceId = invoiceResponse.body.invoice._id;
+
+    const cancelled = await api()
+      .patch(`/api/v1/invoices/${invoiceId}/status`)
+      .set(authHeader(token))
+      .send({ status: 'cancelled' })
+      .expect(200);
+
+    assert.equal(cancelled.body.invoice.status, 'cancelled');
+    assert.equal(cancelled.body.invoice.balanceDue, 0);
+    assert.equal((await Product.findById(product._id).lean()).stockQuantity, 5);
+    assert.equal(await Invoice.countDocuments({ business: business._id }), 1);
+
+    await api().delete(`/api/v1/invoices/${invoiceId}`).set(authHeader(token)).set(IDEMPOTENCY_HEADER, 'delete-after-cancel').expect(200);
+    assert.equal((await Product.findById(product._id).lean()).stockQuantity, 5);
+    assert.equal(await Invoice.countDocuments({ business: business._id }), 0);
+  });
+
+  it('blocks cancelling or deleting invoices with recorded payments', async () => {
+    const { business, token } = await createTestContext();
+    const customer = await createCustomer(business);
+    const product = await createProduct(business, { stockQuantity: 5, price: 120 });
+    const invoiceResponse = await createInvoice({ token, customer, product, quantity: 2, key: 'paid-guard-invoice' }).expect(201);
+    const invoiceId = invoiceResponse.body.invoice._id;
+
+    await api()
+      .post(`/api/v1/payments/invoices/${invoiceId}/record`)
+      .set(authHeader(token))
+      .set(IDEMPOTENCY_HEADER, 'paid-guard-payment')
+      .send({ amount: 100, method: 'cash' })
+      .expect(201);
+
+    const cancelResponse = await api()
+      .patch(`/api/v1/invoices/${invoiceId}/status`)
+      .set(authHeader(token))
+      .send({ status: 'cancelled' })
+      .expect(409);
+    assert.equal(cancelResponse.body.details.code, 'INVOICE_HAS_PAYMENTS');
+
+    const deleteResponse = await api()
+      .delete(`/api/v1/invoices/${invoiceId}`)
+      .set(authHeader(token))
+      .set(IDEMPOTENCY_HEADER, 'paid-guard-delete')
+      .expect(409);
+    assert.equal(deleteResponse.body.details.code, 'INVOICE_HAS_PAYMENTS');
+    assert.equal((await Product.findById(product._id).lean()).stockQuantity, 3);
+    assert.equal(await Invoice.countDocuments({ business: business._id }), 1);
+  });
+
   it('rejects insufficient stock and rolls back invoice writes', async () => {
     const { business, token } = await createTestContext();
     const customer = await createCustomer(business);
