@@ -26,6 +26,11 @@ const businessProfile = (business) => ({
   state: business?.state || '',
   invoicePrefix: business?.invoicePrefix || 'INV',
   panNumber: business?.panNumber || '',
+  taxSettings: {
+    defaultRate: business?.taxSettings?.defaultRate ?? 0,
+    pricesIncludeTax: business?.taxSettings?.pricesIncludeTax ?? false,
+    compoundTax: business?.taxSettings?.compoundTax ?? false
+  },
   theme: business?.theme || 'light'
 });
 
@@ -114,7 +119,11 @@ export const settingsRules = [
   body('state').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 80 }),
   body('panNumber').optional({ nullable: true, checkFalsy: true }).trim().matches(/^[A-Z]{5}[0-9]{4}[A-Z]$/i).withMessage('Enter a valid PAN'),
   body('invoicePrefix').optional().trim().isLength({ min: 1, max: 12 }),
-  body('theme').optional().isIn(['light', 'dark'])
+  body('theme').optional().isIn(['light', 'dark']),
+  body('taxSettings').optional().isObject().withMessage('taxSettings must be an object'),
+  body('taxSettings.defaultRate').optional().isFloat({ min: 0, max: 100 }).withMessage('Default tax rate must be between 0 and 100'),
+  body('taxSettings.pricesIncludeTax').optional().isBoolean(),
+  body('taxSettings.compoundTax').optional().isBoolean()
 ];
 
 export const register = asyncHandler(async (req, res) => {
@@ -300,8 +309,16 @@ export const updateSettings = asyncHandler(async (req, res) => {
     }
   });
 
+  if (req.body.taxSettings && typeof req.body.taxSettings === 'object') {
+    const tax = req.body.taxSettings;
+    if (tax.defaultRate !== undefined) req.business.taxSettings.defaultRate = Number(tax.defaultRate) || 0;
+    if (tax.pricesIncludeTax !== undefined) req.business.taxSettings.pricesIncludeTax = Boolean(tax.pricesIncludeTax);
+    if (tax.compoundTax !== undefined) req.business.taxSettings.compoundTax = Boolean(tax.compoundTax);
+  }
+
   await req.business.save();
-  void logAudit(req, { action: 'settings.updated', resourceType: 'business', resourceId: req.business._id, metadata: { fields: allowed.filter((field) => Object.prototype.hasOwnProperty.call(req.body, field)) } });
+  const updatedFields = allowed.filter((field) => Object.prototype.hasOwnProperty.call(req.body, field)).concat(req.body.taxSettings ? ['taxSettings'] : []);
+  void logAudit(req, { action: 'settings.updated', resourceType: 'business', resourceId: req.business._id, metadata: { fields: updatedFields } });
 
   res.json({ success: true, user: await publicUser(req.user, req.business, req.membership) });
 });

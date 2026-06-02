@@ -16,6 +16,11 @@ const businessSchema = new mongoose.Schema(
     state: { type: String, default: '', trim: true, maxlength: 80 },
     invoicePrefix: { type: String, default: 'INV', trim: true, uppercase: true, maxlength: 12 },
     panNumber: { type: String, default: '', trim: true, uppercase: true, maxlength: 10 },
+    taxSettings: {
+      defaultRate: { type: Number, default: 0, min: 0, max: 100 },
+      pricesIncludeTax: { type: Boolean, default: false },
+      compoundTax: { type: Boolean, default: false }
+    },
     theme: { type: String, enum: ['light', 'dark'], default: 'light' },
     status: { type: String, enum: ['active', 'suspended'], default: 'active', index: true }
   },
