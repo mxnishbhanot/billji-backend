@@ -18,6 +18,9 @@ const draftSchema = new mongoose.Schema(
 
 draftSchema.index({ business: 1, user: 1, localDraftId: 1 }, { unique: true });
 draftSchema.index({ business: 1, user: 1, documentType: 1, lastEditedAt: -1 });
+// Abandoned drafts expire automatically — without this they accumulate forever,
+// since the client only deletes on explicit discard or document creation.
+draftSchema.index({ lastEditedAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
 
 const Draft = mongoose.models.Draft || mongoose.model('Draft', draftSchema);
 
