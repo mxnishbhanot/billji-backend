@@ -1,14 +1,40 @@
 import NotificationRead from '../models/NotificationRead.js';
 import Notification from '../models/Notification.js';
+import UserNotificationPreference from '../models/UserNotificationPreference.js';
+import { NOTIFICATION_CHANNELS, NOTIFICATION_TYPES } from '../constants/notificationTypes.js';
 import { materializeReminderNotifications, serializeNotification } from '../services/notificationService.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { getPagination, paginationMeta } from '../utils/pagination.js';
 
-const activeFilter = (businessId, dismissedIds = []) => ({
+const activeFilter = (businessId, dismissedIds = [], disabledTypes = []) => ({
   business: businessId,
   resolvedAt: null,
-  ...(dismissedIds.length ? { notificationId: { $nin: dismissedIds } } : {})
+  ...(dismissedIds.length ? { notificationId: { $nin: dismissedIds } } : {}),
+  ...(disabledTypes.length ? { type: { $nin: disabledTypes } } : {})
 });
+
+const disabledTypesFor = async (businessId, userId) => {
+  const doc = await UserNotificationPreference.findOne({ business: businessId, user: userId }).select('preferences').lean();
+  if (!doc?.preferences) return [];
+  return Object.entries(doc.preferences)
+    .filter(([, channels]) => channels && channels.inApp === false)
+    .map(([type]) => type);
+};
+
+const sanitizePreferences = (input) => {
+  const cleaned = {};
+  if (!input || typeof input !== 'object') return cleaned;
+  for (const type of NOTIFICATION_TYPES) {
+    const channels = input[type];
+    if (!channels || typeof channels !== 'object') continue;
+    const entry = {};
+    for (const channel of NOTIFICATION_CHANNELS) {
+      if (typeof channels[channel] === 'boolean') entry[channel] = channels[channel];
+    }
+    if (Object.keys(entry).length) cleaned[type] = entry;
+  }
+  return cleaned;
+};
 
 const userNotificationStates = async (businessId, userId) =>
   NotificationRead.find({ business: businessId, user: userId }).select('notificationId readAt dismissedAt').lean();
@@ -24,9 +50,12 @@ export const listNotifications = asyncHandler(async (req, res) => {
 
   await materializeReminderNotifications(req.business._id);
 
-  const states = await userNotificationStates(req.business._id, req.user._id);
+  const [states, disabledTypes] = await Promise.all([
+    userNotificationStates(req.business._id, req.user._id),
+    disabledTypesFor(req.business._id, req.user._id)
+  ]);
   const { dismissedIds, readIds, stateById } = stateSets(states);
-  const filter = activeFilter(req.business._id, dismissedIds);
+  const filter = activeFilter(req.business._id, dismissedIds, disabledTypes);
   const unreadFilter = {
     ...filter,
     ...(readIds.length ? { notificationId: { $nin: [...dismissedIds, ...readIds] } } : {})
@@ -53,9 +82,12 @@ export const markNotificationsSeen = asyncHandler(async (req, res) => {
 
   if (req.body.all) {
     await materializeReminderNotifications(req.business._id);
-    const states = await userNotificationStates(req.business._id, req.user._id);
+    const [states, disabledTypes] = await Promise.all([
+      userNotificationStates(req.business._id, req.user._id),
+      disabledTypesFor(req.business._id, req.user._id)
+    ]);
     const { dismissedIds } = stateSets(states);
-    notificationIds = await Notification.find(activeFilter(req.business._id, dismissedIds)).distinct('notificationId');
+    notificationIds = await Notification.find(activeFilter(req.business._id, dismissedIds, disabledTypes)).distinct('notificationId');
   }
 
   if (notificationIds.length) {
@@ -72,6 +104,21 @@ export const markNotificationsSeen = asyncHandler(async (req, res) => {
   }
 
   res.json({ success: true });
+});
+
+export const getNotificationPreferences = asyncHandler(async (req, res) => {
+  const doc = await UserNotificationPreference.findOne({ business: req.business._id, user: req.user._id }).select('preferences').lean();
+  res.json({ success: true, preferences: doc?.preferences || {} });
+});
+
+export const updateNotificationPreferences = asyncHandler(async (req, res) => {
+  const preferences = sanitizePreferences(req.body.preferences);
+  const doc = await UserNotificationPreference.findOneAndUpdate(
+    { business: req.business._id, user: req.user._id },
+    { $set: { preferences }, $setOnInsert: { business: req.business._id, user: req.user._id } },
+    { upsert: true, new: true, lean: true }
+  );
+  res.json({ success: true, preferences: doc.preferences || {} });
 });
 
 export const dismissNotifications = asyncHandler(async (req, res) => {
