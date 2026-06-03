@@ -48,28 +48,32 @@ export const getReportSummary = async (businessId, range = {}) => {
   const rangeDateFilter = buildDateFilter(range);
   const activeDocumentFilter = { documentStatus: { $nin: ['cancelled', 'void'] } };
   const baseFilter = rangeDateFilter ? { business: businessId, documentType: 'invoice', date: rangeDateFilter } : { business: businessId, documentType: 'invoice' };
-  const rangePaidFilter = { ...baseFilter, ...activeDocumentFilter, paymentStatus: 'paid' };
-  const trendFilter = rangeDateFilter ? rangePaidFilter : { business: businessId, documentType: 'invoice', ...activeDocumentFilter, paymentStatus: 'paid', date: { $gte: weekStart, $lt: tomorrow } };
+  // Count fully and partially paid invoices. Fully paid sum their total (legacy paid
+  // docs may have paidAmount = 0); partial sum only the collected paidAmount.
+  const collectedStatusFilter = { paymentStatus: { $in: ['paid', 'partial'] } };
+  const collectedAmountExpr = { $cond: [{ $eq: ['$paymentStatus', 'partial'] }, { $ifNull: ['$paidAmount', 0] }, '$total'] };
+  const rangePaidFilter = { ...baseFilter, ...activeDocumentFilter, ...collectedStatusFilter };
+  const trendFilter = rangeDateFilter ? rangePaidFilter : { business: businessId, documentType: 'invoice', ...activeDocumentFilter, ...collectedStatusFilter, date: { $gte: weekStart, $lt: tomorrow } };
   const rangeLabel = rangeDateFilter ? 'Selected range' : 'Last 7 days';
 
-  const paidFilter = { business: businessId, documentType: 'invoice', ...activeDocumentFilter, paymentStatus: 'paid' };
+  const paidFilter = { business: businessId, documentType: 'invoice', ...activeDocumentFilter, ...collectedStatusFilter };
 
   const [today, weekly, monthly, rangeSales, counts, topProducts, trend, recentInvoices] = await Promise.all([
     Invoice.aggregate([
       { $match: { ...paidFilter, date: { $gte: todayStart, $lt: tomorrow } } },
-      { $group: { _id: null, total: { $sum: '$total' } } }
+      { $group: { _id: null, total: { $sum: collectedAmountExpr } } }
     ]),
     Invoice.aggregate([
       { $match: { ...paidFilter, date: { $gte: weekStart, $lt: tomorrow } } },
-      { $group: { _id: null, total: { $sum: '$total' } } }
+      { $group: { _id: null, total: { $sum: collectedAmountExpr } } }
     ]),
     Invoice.aggregate([
       { $match: { ...paidFilter, date: { $gte: monthStart, $lt: tomorrow } } },
-      { $group: { _id: null, total: { $sum: '$total' } } }
+      { $group: { _id: null, total: { $sum: collectedAmountExpr } } }
     ]),
     Invoice.aggregate([
       { $match: trendFilter },
-      { $group: { _id: null, total: { $sum: '$total' } } }
+      { $group: { _id: null, total: { $sum: collectedAmountExpr } } }
     ]),
     Invoice.aggregate([
       { $match: baseFilter },
@@ -99,7 +103,7 @@ export const getReportSummary = async (businessId, range = {}) => {
       {
         $group: {
           _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
-          sales: { $sum: '$total' },
+          sales: { $sum: collectedAmountExpr },
           invoices: { $sum: 1 }
         }
       },

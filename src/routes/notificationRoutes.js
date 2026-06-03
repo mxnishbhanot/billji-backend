@@ -1,6 +1,12 @@
 import { Router } from 'express';
 import { body, query } from 'express-validator';
-import { dismissNotifications, listNotifications, markNotificationsSeen } from '../controllers/notificationController.js';
+import {
+  dismissNotifications,
+  getNotificationPreferences,
+  listNotifications,
+  markNotificationsSeen,
+  updateNotificationPreferences
+} from '../controllers/notificationController.js';
 import { protect } from '../middlewares/auth.js';
 import { PERMISSIONS, requirePermission } from '../middlewares/authorization.js';
 import { validate } from '../middlewares/validate.js';
@@ -17,6 +23,14 @@ router.get(
   ],
   validate,
   listNotifications
+);
+router.get('/preferences', requirePermission(PERMISSIONS.notificationsView), getNotificationPreferences);
+router.put(
+  '/preferences',
+  requirePermission(PERMISSIONS.notificationsManage),
+  [body('preferences').isObject().withMessage('preferences must be an object')],
+  validate,
+  updateNotificationPreferences
 );
 router.patch(
   '/seen',
