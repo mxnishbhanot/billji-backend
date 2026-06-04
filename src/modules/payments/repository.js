@@ -77,3 +77,10 @@ export const updateCustomerBalance = async (businessId, customerId, totals, { se
 };
 
 export const listPaymentRecords = (filter) => Payment.find(filter).sort({ receivedAt: -1, createdAt: -1 });
+
+// Payment ids that were allocated to a given invoice (covers multi-invoice
+// payments whose stored `invoice` field points at a different invoice).
+export const paymentIdsAllocatedToInvoice = async (businessId, invoiceId) => {
+  const allocations = await PaymentAllocation.find({ business: businessId, invoice: invoiceId }).select('payment').lean();
+  return allocations.map((allocation) => allocation.payment);
+};

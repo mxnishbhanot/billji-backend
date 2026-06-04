@@ -10,6 +10,24 @@ export const invoicePaymentParamRules = [
   param('invoiceId').isMongoId().withMessage('Valid invoice id is required')
 ];
 
+export const customerPaymentParamRules = [
+  param('customerId').isMongoId().withMessage('Valid customer id is required')
+];
+
+export const recordCustomerPaymentRules = [
+  body('amount').isFloat({ min: 0.01 }).withMessage('Payment amount must be greater than zero').toFloat(),
+  body('invoiceIds').isArray({ min: 1 }).withMessage('At least one invoice is required'),
+  body('invoiceIds.*').isMongoId().withMessage('Invalid invoice id'),
+  body('allowCredit').optional().isBoolean().toBoolean(),
+  body('method').optional().isIn(PAYMENT_METHODS),
+  body('type').optional().isIn(PAYMENT_TYPES),
+  body('currency').optional().trim().isLength({ min: 3, max: 3 }),
+  body('reference').optional({ nullable: true }).trim().isLength({ max: 160 }),
+  body('notes').optional({ nullable: true }).trim().isLength({ max: 1000 }),
+  body('receivedAt').optional({ checkFalsy: true }).isISO8601(),
+  body('metadata').optional().isObject()
+];
+
 export const recordPaymentRules = [
   body('amount').isFloat({ min: 0.01 }).withMessage('Payment amount must be greater than zero').toFloat(),
   body('method').optional().isIn(PAYMENT_METHODS),
