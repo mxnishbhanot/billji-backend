@@ -21,6 +21,13 @@ const businessSchema = new mongoose.Schema(
       pricesIncludeTax: { type: Boolean, default: false },
       compoundTax: { type: Boolean, default: false }
     },
+    invoiceTemplate: {
+      accentColor: { type: String, default: '#4338CA', trim: true, maxlength: 9 },
+      showLogo: { type: Boolean, default: true },
+      showNotes: { type: Boolean, default: true },
+      showSignature: { type: Boolean, default: true },
+      showPaymentRows: { type: Boolean, default: true }
+    },
     theme: { type: String, enum: ['light', 'dark'], default: 'light' },
     status: { type: String, enum: ['active', 'suspended'], default: 'active', index: true }
   },

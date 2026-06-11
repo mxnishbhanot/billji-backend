@@ -31,6 +31,13 @@ const businessProfile = (business) => ({
     pricesIncludeTax: business?.taxSettings?.pricesIncludeTax ?? false,
     compoundTax: business?.taxSettings?.compoundTax ?? false
   },
+  invoiceTemplate: {
+    accentColor: business?.invoiceTemplate?.accentColor || '#4338CA',
+    showLogo: business?.invoiceTemplate?.showLogo ?? true,
+    showNotes: business?.invoiceTemplate?.showNotes ?? true,
+    showSignature: business?.invoiceTemplate?.showSignature ?? true,
+    showPaymentRows: business?.invoiceTemplate?.showPaymentRows ?? true
+  },
   theme: business?.theme || 'light'
 });
 
@@ -123,7 +130,13 @@ export const settingsRules = [
   body('taxSettings').optional().isObject().withMessage('taxSettings must be an object'),
   body('taxSettings.defaultRate').optional().isFloat({ min: 0, max: 100 }).withMessage('Default tax rate must be between 0 and 100'),
   body('taxSettings.pricesIncludeTax').optional().isBoolean(),
-  body('taxSettings.compoundTax').optional().isBoolean()
+  body('taxSettings.compoundTax').optional().isBoolean(),
+  body('invoiceTemplate').optional().isObject().withMessage('invoiceTemplate must be an object'),
+  body('invoiceTemplate.accentColor').optional().trim().matches(/^#[0-9a-fA-F]{6}$/).withMessage('Accent color must be a hex value'),
+  body('invoiceTemplate.showLogo').optional().isBoolean(),
+  body('invoiceTemplate.showNotes').optional().isBoolean(),
+  body('invoiceTemplate.showSignature').optional().isBoolean(),
+  body('invoiceTemplate.showPaymentRows').optional().isBoolean()
 ];
 
 export const register = asyncHandler(async (req, res) => {
@@ -316,8 +329,20 @@ export const updateSettings = asyncHandler(async (req, res) => {
     if (tax.compoundTax !== undefined) req.business.taxSettings.compoundTax = Boolean(tax.compoundTax);
   }
 
+  if (req.body.invoiceTemplate && typeof req.body.invoiceTemplate === 'object') {
+    const tpl = req.body.invoiceTemplate;
+    if (tpl.accentColor !== undefined) req.business.invoiceTemplate.accentColor = String(tpl.accentColor) || '#4338CA';
+    if (tpl.showLogo !== undefined) req.business.invoiceTemplate.showLogo = Boolean(tpl.showLogo);
+    if (tpl.showNotes !== undefined) req.business.invoiceTemplate.showNotes = Boolean(tpl.showNotes);
+    if (tpl.showSignature !== undefined) req.business.invoiceTemplate.showSignature = Boolean(tpl.showSignature);
+    if (tpl.showPaymentRows !== undefined) req.business.invoiceTemplate.showPaymentRows = Boolean(tpl.showPaymentRows);
+  }
+
   await req.business.save();
-  const updatedFields = allowed.filter((field) => Object.prototype.hasOwnProperty.call(req.body, field)).concat(req.body.taxSettings ? ['taxSettings'] : []);
+  const updatedFields = allowed
+    .filter((field) => Object.prototype.hasOwnProperty.call(req.body, field))
+    .concat(req.body.taxSettings ? ['taxSettings'] : [])
+    .concat(req.body.invoiceTemplate ? ['invoiceTemplate'] : []);
   void logAudit(req, { action: 'settings.updated', resourceType: 'business', resourceId: req.business._id, metadata: { fields: updatedFields } });
 
   res.json({ success: true, user: await publicUser(req.user, req.business, req.membership) });
