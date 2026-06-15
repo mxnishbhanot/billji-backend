@@ -7,6 +7,7 @@ import {
   emailInvoice,
   getInvoice,
   listInvoices,
+  previewInvoice,
   revokeInvoiceShareLink,
   rotateInvoiceShareLink,
   updateInvoiceStatus,
@@ -23,6 +24,7 @@ const router = Router();
 router.use(protect);
 router.get('/', requirePermission(PERMISSIONS.invoicesView), invoiceQueryRules, validate, listInvoices);
 router.post('/', requirePermission(PERMISSIONS.invoicesCreate), invoiceRules, validate, idempotency(), createInvoice);
+router.post('/preview', requirePermission(PERMISSIONS.invoicesCreate), invoiceRules, validate, previewInvoice);
 router.get('/:id', requirePermission(PERMISSIONS.invoicesView), getInvoice);
 router.patch('/:id/status', requirePermission(PERMISSIONS.invoicesUpdate), updateInvoiceStatus);
 router.post('/:id/duplicate', requirePermission(PERMISSIONS.invoicesCreate), idempotency(), duplicateInvoice);

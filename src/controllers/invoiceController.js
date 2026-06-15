@@ -6,18 +6,22 @@ import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import {
   buildInvoiceShareMessage,
+  buildCustomerSnapshot,
   buildPublicInvoicePdfUrl,
   buildWhatsAppLink,
   getInvoiceForBusiness,
+  normalizeItems,
   serializeInvoice
 } from '../services/invoiceService.js';
 import { sendInvoiceEmail } from '../services/emailService.js';
+import { buildInvoiceHtml } from '../services/invoiceHtml.js';
 import { generateInvoicePdf } from '../services/pdfService.js';
 import { resolveInvoiceReminderNotifications } from '../services/notificationService.js';
 import { emitBusinessEvent } from '../services/socketService.js';
 import { logAudit } from '../services/auditService.js';
 import { paginateQuery, UNPAGINATED_LIST_CAP, wantsPagination } from '../utils/pagination.js';
 import { buildSearchRegex } from '../utils/searchRegex.js';
+import { calculateInvoiceTotals } from '../utils/invoiceMath.js';
 
 const parseDateParam = (value) => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -120,6 +124,37 @@ export const createInvoice = asyncHandler(async (req, res) => {
 
   void logAudit(req, { action: 'invoice.created', resourceType: 'invoice', resourceId: invoice._id, metadata: { invoiceNumber: invoice.invoiceNumber, total: invoice.total } });
   res.status(201).json({ success: true, invoice: serializeInvoice(invoice, req) });
+});
+
+export const previewInvoice = asyncHandler(async (req, res) => {
+  const { snapshot } = await buildCustomerSnapshot(req.business._id, req.body);
+  const items = await normalizeItems(req.business._id, req.body.items || [], { allowOversell: true });
+  const totals = calculateInvoiceTotals({
+    items,
+    taxRate: req.body.taxRate,
+    discountType: req.body.discountType,
+    discountValue: req.body.discountValue
+  });
+
+  const previewInvoiceData = {
+    invoiceNumber: `${req.business.invoicePrefix || 'INV'}-PREVIEW`,
+    date: new Date().toISOString(),
+    dueDate: null,
+    status: 'pending',
+    paymentStatus: 'unpaid',
+    customerSnapshot: snapshot,
+    items: totals.items,
+    subtotal: totals.subtotal,
+    tax: totals.tax,
+    discount: totals.discount,
+    total: totals.total,
+    paidAmount: 0,
+    balanceDue: totals.total,
+    notes: req.body.notes || ''
+  };
+
+  const html = buildInvoiceHtml(previewInvoiceData, req.business, { mode: 'screen' });
+  res.type('html').send(html);
 });
 
 export const getInvoice = asyncHandler(async (req, res) => {
