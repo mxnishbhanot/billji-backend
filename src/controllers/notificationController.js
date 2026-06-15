@@ -1,174 +1,73 @@
 import NotificationRead from '../models/NotificationRead.js';
-import Invoice from '../models/Invoice.js';
-import Product from '../models/Product.js';
+import Notification from '../models/Notification.js';
+import UserNotificationPreference from '../models/UserNotificationPreference.js';
+import { NOTIFICATION_CHANNELS, NOTIFICATION_TYPES } from '../constants/notificationTypes.js';
+import { materializeReminderNotifications, serializeNotification } from '../services/notificationService.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { getPagination, paginationMeta } from '../utils/pagination.js';
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-const startOfDay = (value = new Date()) => {
-  const date = new Date(value);
-  date.setHours(0, 0, 0, 0);
-  return date;
-};
-
-const formatDate = (value) =>
-  new Intl.DateTimeFormat('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric'
-  }).format(new Date(value));
-
-const notificationId = (type, item) => {
-  const stamp = new Date(item.updatedAt || item.createdAt || item.date || Date.now()).getTime();
-  return `${type}:${item._id}:${stamp}`;
-};
-
-const productNotification = ({ type, product, tone, title, description }) => ({
-  id: notificationId(type, product),
-  type,
-  resourceType: 'product',
-  resourceId: product._id,
-  tone,
-  title,
-  description,
-  to: `/products?highlight=${product._id}`,
-  sortDate: product.updatedAt || product.createdAt,
-  priority: tone === 'danger' ? 1 : 2
+const activeFilter = (businessId, dismissedIds = [], disabledTypes = []) => ({
+  business: businessId,
+  resolvedAt: null,
+  ...(dismissedIds.length ? { notificationId: { $nin: dismissedIds } } : {}),
+  ...(disabledTypes.length ? { type: { $nin: disabledTypes } } : {})
 });
 
-const invoiceNotification = ({ type, invoice, tone, title, description }) => ({
-  id: notificationId(type, invoice),
-  type,
-  resourceType: 'invoice',
-  resourceId: invoice._id,
-  tone,
-  title,
-  description,
-  to: `/invoices/${invoice._id}`,
-  sortDate: invoice.dueDate || invoice.updatedAt || invoice.createdAt || invoice.date,
-  priority: tone === 'danger' ? 1 : 2
-});
-
-const notificationFilters = (userId) => {
-  const today = startOfDay();
-  const soonLimit = new Date(today.getTime() + 3 * DAY_MS);
-  const oldPendingLimit = new Date(today.getTime() - 7 * DAY_MS);
-
-  return {
-    negativeStock: { user: userId, stockQuantity: { $lt: 0 } },
-    lowStock: {
-      user: userId,
-      stockQuantity: { $gte: 0 },
-      $expr: { $lte: ['$stockQuantity', '$lowStockThreshold'] }
-    },
-    overdueInvoices: { user: userId, status: 'pending', dueDate: { $lt: today } },
-    dueSoonInvoices: { user: userId, status: 'pending', dueDate: { $gte: today, $lte: soonLimit } },
-    oldPendingInvoices: { user: userId, status: 'pending', dueDate: null, createdAt: { $lte: oldPendingLimit } }
-  };
+const disabledTypesFor = async (businessId, userId) => {
+  const doc = await UserNotificationPreference.findOne({ business: businessId, user: userId }).select('preferences').lean();
+  if (!doc?.preferences) return [];
+  return Object.entries(doc.preferences)
+    .filter(([, channels]) => channels && channels.inApp === false)
+    .map(([type]) => type);
 };
 
-const sortNotifications = (notifications) =>
-  notifications.sort((a, b) => a.priority - b.priority || new Date(b.sortDate || 0) - new Date(a.sortDate || 0));
-
-const buildNotifications = async (userId, fetchLimit) => {
-  if (fetchLimit <= 0) {
-    return [];
+const sanitizePreferences = (input) => {
+  const cleaned = {};
+  if (!input || typeof input !== 'object') return cleaned;
+  for (const type of NOTIFICATION_TYPES) {
+    const channels = input[type];
+    if (!channels || typeof channels !== 'object') continue;
+    const entry = {};
+    for (const channel of NOTIFICATION_CHANNELS) {
+      if (typeof channels[channel] === 'boolean') entry[channel] = channels[channel];
+    }
+    if (Object.keys(entry).length) cleaned[type] = entry;
   }
-
-  const filters = notificationFilters(userId);
-  const [negativeStock, lowStock, overdueInvoices, dueSoonInvoices, oldPendingInvoices] = await Promise.all([
-    Product.find(filters.negativeStock).sort({ updatedAt: -1 }).limit(fetchLimit).lean(),
-    Product.find(filters.lowStock).sort({ updatedAt: -1 }).limit(fetchLimit).lean(),
-    Invoice.find(filters.overdueInvoices).sort({ dueDate: 1, updatedAt: -1 }).limit(fetchLimit).lean(),
-    Invoice.find(filters.dueSoonInvoices).sort({ dueDate: 1, updatedAt: -1 }).limit(fetchLimit).lean(),
-    Invoice.find(filters.oldPendingInvoices).sort({ createdAt: 1 }).limit(fetchLimit).lean()
-  ]);
-
-  return sortNotifications([
-    ...negativeStock.map((product) =>
-      productNotification({
-        type: 'negative-stock',
-        product,
-        tone: 'danger',
-        title: `${product.name} is below zero stock`,
-        description: `${Math.abs(Number(product.stockQuantity || 0))} item${Math.abs(Number(product.stockQuantity || 0)) === 1 ? '' : 's'} oversold. Update stock after the force sale.`
-      })
-    ),
-    ...lowStock.map((product) =>
-      productNotification({
-        type: 'low-stock',
-        product,
-        tone: 'warning',
-        title: `${product.name} is low on stock`,
-        description: `${product.stockQuantity} left. Alert threshold is ${product.lowStockThreshold}.`
-      })
-    ),
-    ...overdueInvoices.map((invoice) =>
-      invoiceNotification({
-        type: 'overdue-invoice',
-        invoice,
-        tone: 'danger',
-        title: `${invoice.invoiceNumber} is overdue`,
-        description: `${invoice.customerSnapshot.name} payment was due on ${formatDate(invoice.dueDate)}.`
-      })
-    ),
-    ...dueSoonInvoices.map((invoice) =>
-      invoiceNotification({
-        type: 'due-soon-invoice',
-        invoice,
-        tone: 'warning',
-        title: `${invoice.invoiceNumber} is due soon`,
-        description: `${invoice.customerSnapshot.name} payment is due on ${formatDate(invoice.dueDate)}.`
-      })
-    ),
-    ...oldPendingInvoices.map((invoice) =>
-      invoiceNotification({
-        type: 'old-pending-invoice',
-        invoice,
-        tone: 'info',
-        title: `${invoice.invoiceNumber} needs follow-up`,
-        description: `${invoice.customerSnapshot.name} has been pending since ${formatDate(invoice.createdAt || invoice.date)}.`
-      })
-    )
-  ]);
+  return cleaned;
 };
 
-const countNotifications = async (userId) => {
-  const filters = notificationFilters(userId);
-  const counts = await Promise.all([
-    Product.countDocuments(filters.negativeStock),
-    Product.countDocuments(filters.lowStock),
-    Invoice.countDocuments(filters.overdueInvoices),
-    Invoice.countDocuments(filters.dueSoonInvoices),
-    Invoice.countDocuments(filters.oldPendingInvoices)
-  ]);
+const userNotificationStates = async (businessId, userId) =>
+  NotificationRead.find({ business: businessId, user: userId }).select('notificationId readAt dismissedAt').lean();
 
-  return counts.reduce((sum, count) => sum + count, 0);
-};
+const stateSets = (states) => ({
+  dismissedIds: states.filter((state) => state.dismissedAt).map((state) => state.notificationId),
+  readIds: states.filter((state) => state.readAt && !state.dismissedAt).map((state) => state.notificationId),
+  stateById: new Map(states.map((state) => [state.notificationId, state]))
+});
 
 export const listNotifications = asyncHandler(async (req, res) => {
   const { page, limit, skip } = getPagination(req.query, { defaultLimit: 10, maxLimit: 50 });
-  const total = await countNotifications(req.user._id);
-  const [pageCandidates, allCandidates] = await Promise.all([
-    buildNotifications(req.user._id, Math.min(skip + limit, total)),
-    buildNotifications(req.user._id, total)
-  ]);
-  const pageNotifications = pageCandidates.slice(skip, skip + limit);
-  const readIds = new Set(
-    (
-      await NotificationRead.find({
-        user: req.user._id,
-        notificationId: { $in: allCandidates.map((notification) => notification.id) }
-      }).select('notificationId')
-    ).map((read) => read.notificationId)
-  );
 
-  const notifications = pageNotifications.map((notification) => ({
-    ...notification,
-    read: readIds.has(notification.id)
-  }));
-  const unreadCount = allCandidates.filter((notification) => !readIds.has(notification.id)).length;
+  await materializeReminderNotifications(req.business._id);
+
+  const [states, disabledTypes] = await Promise.all([
+    userNotificationStates(req.business._id, req.user._id),
+    disabledTypesFor(req.business._id, req.user._id)
+  ]);
+  const { dismissedIds, readIds, stateById } = stateSets(states);
+  const filter = activeFilter(req.business._id, dismissedIds, disabledTypes);
+  const unreadFilter = {
+    ...filter,
+    ...(readIds.length ? { notificationId: { $nin: [...dismissedIds, ...readIds] } } : {})
+  };
+
+  const [total, unreadCount, pageNotifications] = await Promise.all([
+    Notification.countDocuments(filter),
+    Notification.countDocuments(unreadFilter),
+    Notification.find(filter).sort({ priority: 1, sortDate: -1, createdAt: -1 }).skip(skip).limit(limit).lean()
+  ]);
+
+  const notifications = pageNotifications.map((notification) => serializeNotification(notification, stateById.get(notification.notificationId)));
 
   res.json({
     success: true,
@@ -179,14 +78,58 @@ export const listNotifications = asyncHandler(async (req, res) => {
 });
 
 export const markNotificationsSeen = asyncHandler(async (req, res) => {
+  let notificationIds = Array.isArray(req.body.notificationIds) ? req.body.notificationIds.filter(Boolean) : [];
+
+  if (req.body.all) {
+    await materializeReminderNotifications(req.business._id);
+    const [states, disabledTypes] = await Promise.all([
+      userNotificationStates(req.business._id, req.user._id),
+      disabledTypesFor(req.business._id, req.user._id)
+    ]);
+    const { dismissedIds } = stateSets(states);
+    notificationIds = await Notification.find(activeFilter(req.business._id, dismissedIds, disabledTypes)).distinct('notificationId');
+  }
+
+  if (notificationIds.length) {
+    await NotificationRead.bulkWrite(
+      Array.from(new Set(notificationIds)).map((id) => ({
+        updateOne: {
+          filter: { business: req.business._id, user: req.user._id, notificationId: id },
+          update: { $set: { readAt: new Date() }, $setOnInsert: { business: req.business._id, user: req.user._id, notificationId: id } },
+          upsert: true
+        }
+      })),
+      { ordered: false }
+    );
+  }
+
+  res.json({ success: true });
+});
+
+export const getNotificationPreferences = asyncHandler(async (req, res) => {
+  const doc = await UserNotificationPreference.findOne({ business: req.business._id, user: req.user._id }).select('preferences').lean();
+  res.json({ success: true, preferences: doc?.preferences || {} });
+});
+
+export const updateNotificationPreferences = asyncHandler(async (req, res) => {
+  const preferences = sanitizePreferences(req.body.preferences);
+  const doc = await UserNotificationPreference.findOneAndUpdate(
+    { business: req.business._id, user: req.user._id },
+    { $set: { preferences }, $setOnInsert: { business: req.business._id, user: req.user._id } },
+    { upsert: true, new: true, lean: true }
+  );
+  res.json({ success: true, preferences: doc.preferences || {} });
+});
+
+export const dismissNotifications = asyncHandler(async (req, res) => {
   const notificationIds = Array.isArray(req.body.notificationIds) ? req.body.notificationIds.filter(Boolean) : [];
 
   if (notificationIds.length) {
     await NotificationRead.bulkWrite(
       Array.from(new Set(notificationIds)).map((id) => ({
         updateOne: {
-          filter: { user: req.user._id, notificationId: id },
-          update: { $setOnInsert: { user: req.user._id, notificationId: id } },
+          filter: { business: req.business._id, user: req.user._id, notificationId: id },
+          update: { $set: { dismissedAt: new Date(), readAt: new Date() }, $setOnInsert: { business: req.business._id, user: req.user._id, notificationId: id } },
           upsert: true
         }
       })),

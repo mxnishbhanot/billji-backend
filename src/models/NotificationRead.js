@@ -2,13 +2,16 @@ import mongoose from 'mongoose';
 
 const notificationReadSchema = new mongoose.Schema(
   {
+    business: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true, index: true },
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    notificationId: { type: String, required: true, maxlength: 180 }
+    notificationId: { type: String, required: true, maxlength: 180 },
+    readAt: { type: Date, default: null },
+    dismissedAt: { type: Date, default: null }
   },
   { timestamps: true }
 );
 
-notificationReadSchema.index({ user: 1, notificationId: 1 }, { unique: true });
+notificationReadSchema.index({ business: 1, user: 1, notificationId: 1 }, { unique: true });
 
 const NotificationRead = mongoose.model('NotificationRead', notificationReadSchema);
 

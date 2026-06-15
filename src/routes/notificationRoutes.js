@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import { body, query } from 'express-validator';
-import { listNotifications, markNotificationsSeen } from '../controllers/notificationController.js';
+import {
+  dismissNotifications,
+  getNotificationPreferences,
+  listNotifications,
+  markNotificationsSeen,
+  updateNotificationPreferences
+} from '../controllers/notificationController.js';
 import { protect } from '../middlewares/auth.js';
+import { PERMISSIONS, requirePermission } from '../middlewares/authorization.js';
 import { validate } from '../middlewares/validate.js';
 
 const router = Router();
@@ -9,6 +16,7 @@ const router = Router();
 router.use(protect);
 router.get(
   '/',
+  requirePermission(PERMISSIONS.notificationsView),
   [
     query('page').optional({ checkFalsy: true }).isInt({ min: 1 }).withMessage('Page must be 1 or greater'),
     query('limit').optional({ checkFalsy: true }).isInt({ min: 1, max: 50 }).withMessage('Limit must be between 1 and 50')
@@ -16,11 +24,27 @@ router.get(
   validate,
   listNotifications
 );
+router.get('/preferences', requirePermission(PERMISSIONS.notificationsView), getNotificationPreferences);
+router.put(
+  '/preferences',
+  requirePermission(PERMISSIONS.notificationsManage),
+  [body('preferences').isObject().withMessage('preferences must be an object')],
+  validate,
+  updateNotificationPreferences
+);
 router.patch(
   '/seen',
-  [body('notificationIds').optional().isArray(), body('notificationIds.*').optional().isString().isLength({ max: 180 })],
+  requirePermission(PERMISSIONS.notificationsManage),
+  [body('all').optional().isBoolean(), body('notificationIds').optional().isArray(), body('notificationIds.*').optional().isString().isLength({ max: 180 })],
   validate,
   markNotificationsSeen
+);
+router.patch(
+  '/dismiss',
+  requirePermission(PERMISSIONS.notificationsManage),
+  [body('notificationIds').isArray({ min: 1 }), body('notificationIds.*').isString().isLength({ max: 180 })],
+  validate,
+  dismissNotifications
 );
 
 export default router;

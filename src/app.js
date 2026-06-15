@@ -4,6 +4,7 @@ import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { env, isProduction } from './config/env.js';
+import { API_PREFIX, API_VERSION, LEGACY_API_PREFIX } from './contracts/phase0Architecture.js';
 import { errorHandler, notFound } from './middlewares/error.js';
 import { apiLimiter } from './middlewares/rateLimit.js';
 import routes from './routes/index.js';
@@ -44,10 +45,11 @@ if (!isProduction) {
 }
 
 app.get('/health', (_req, res) => {
-  res.json({ success: true, status: 'ok', service: 'quickinvoice-api' });
+  res.json({ success: true, status: 'ok', service: 'quickinvoice-api', apiVersion: API_VERSION });
 });
 
-app.use('/api', routes);
+app.use(API_PREFIX, routes);
+app.use(LEGACY_API_PREFIX, routes);
 app.use(notFound);
 app.use(errorHandler);
 

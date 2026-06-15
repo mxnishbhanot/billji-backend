@@ -7,7 +7,10 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "seed": "node src/seed/index.js"
+    "seed": "node src/seed/index.js",
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.js\"",
+    "test:watch": "node --watch --test --test-concurrency=1 \"tests/**/*.test.js\"",
+    "test:coverage": "c8 node --test --test-concurrency=1 \"tests/**/*.test.js\""
   },
   "keywords": [
     "invoice",
@@ -31,10 +34,14 @@
     "morgan": "^1.10.0",
     "nodemailer": "^8.0.7",
     "pdfkit": "^0.15.2",
+    "puppeteer": "^25.1.0",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "c8": "^11.0.0",
+    "mongodb-memory-server": "^11.2.0",
+    "nodemon": "^3.1.9",
+    "supertest": "^7.2.2"
   },
   "engines": {
     "node": ">=18.18.0"

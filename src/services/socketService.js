@@ -1,5 +1,7 @@
 import { Server } from 'socket.io';
 import { env, isProduction } from '../config/env.js';
+import Business from '../models/Business.js';
+import BusinessMember from '../models/BusinessMember.js';
 import User from '../models/User.js';
 import { verifyToken } from '../utils/jwt.js';
 
@@ -39,13 +41,20 @@ export const initSocket = (server) => {
       }
 
       const decoded = verifyToken(token);
-      const user = await User.findById(decoded.sub).select('_id');
+      const user = await User.findById(decoded.sub).select('_id defaultBusiness');
 
       if (!user) {
         return next(new Error('Invalid authentication token'));
       }
 
+      let business = null;
+      if (user.defaultBusiness) {
+        const membership = await BusinessMember.findOne({ business: user.defaultBusiness, user: user._id, status: 'active' }).select('_id');
+        business = membership ? await Business.findOne({ _id: user.defaultBusiness, status: 'active' }).select('_id') : null;
+      }
+
       socket.userId = user._id.toString();
+      socket.businessId = business?._id?.toString() || null;
       return next();
     } catch (error) {
       return next(error);
@@ -54,6 +63,9 @@ export const initSocket = (server) => {
 
   io.on('connection', (socket) => {
     socket.join(`user:${socket.userId}`);
+    if (socket.businessId) {
+      socket.join(`business:${socket.businessId}`);
+    }
   });
 
   return io;
@@ -65,4 +77,12 @@ export const emitUserEvent = (userId, event, payload = {}) => {
   }
 
   io.to(`user:${userId.toString()}`).emit(event, payload);
+};
+
+export const emitBusinessEvent = (businessId, event, payload = {}) => {
+  if (!io || !businessId) {
+    return;
+  }
+
+  io.to(`business:${businessId.toString()}`).emit(event, payload);
 };
