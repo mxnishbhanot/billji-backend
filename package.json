@@ -21,6 +21,8 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1069.0",
+    "@aws-sdk/s3-request-presigner": "^3.1069.0",
     "bcrypt": "^6.0.0",
     "compression": "^1.7.4",
     "cors": "^2.8.5",
@@ -32,9 +34,9 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.5",
     "morgan": "^1.10.0",
-    "nodemailer": "^8.0.7",
     "pdfkit": "^0.15.2",
     "puppeteer": "^25.1.0",
+    "resend": "^6.12.4",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {

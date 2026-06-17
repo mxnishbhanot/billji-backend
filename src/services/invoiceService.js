@@ -7,6 +7,7 @@ import { env } from '../config/env.js';
 import { ApiError } from '../utils/ApiError.js';
 import { calculateInvoiceTotals } from '../utils/invoiceMath.js';
 import { nextDocumentNumber } from './numberingService.js';
+import { getDurableCachedInvoicePdfUrl } from './invoicePdfCache.js';
 import crypto from 'crypto';
 
 const LOCAL_PUBLIC_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1']);
@@ -339,11 +340,17 @@ export const getInvoiceForBusiness = async (businessId, invoiceId, { session } =
   return invoice;
 };
 
-export const buildInvoiceShareMessage = (invoice, req) =>
-  `Hello ${invoice.customerSnapshot.name}, your invoice is ready. Download here: ${buildPublicInvoicePdfUrl(invoice, req)}`;
+// Best download URL for share messages: a durable direct-R2 link when one is
+// configured, else the permanent API share URL (which itself serves from the
+// R2 cache). Never a presigned URL — share messages outlive presigned TTLs.
+export const resolveShareablePdfUrl = async (invoice, req) =>
+  (await getDurableCachedInvoicePdfUrl(invoice)) || buildPublicInvoicePdfUrl(invoice, req);
 
-export const buildWhatsAppLink = (invoice, req) => {
+export const buildInvoiceShareMessage = async (invoice, req) =>
+  `Hello ${invoice.customerSnapshot.name}, your invoice is ready. Download here: ${await resolveShareablePdfUrl(invoice, req)}`;
+
+export const buildWhatsAppLink = async (invoice, req) => {
   const phone = invoice.customerSnapshot.phone.replace(/[^\d]/g, '');
-  const message = buildInvoiceShareMessage(invoice, req);
+  const message = await buildInvoiceShareMessage(invoice, req);
   return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
 };

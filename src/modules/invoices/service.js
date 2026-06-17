@@ -1,4 +1,5 @@
 import { buildInvoicePayload, getInvoiceForBusiness, setInvoicePdfUrl, stockAdjustmentsForInvoice } from '../../services/invoiceService.js';
+import { invalidateInvoicePdf } from '../../services/invoicePdfCache.js';
 import { DOMAIN_EVENTS, publishDomainEvent } from '../../services/eventBus.js';
 import Payment from '../../models/Payment.js';
 import { domainStatusesForLegacy } from '../../models/SalesDocument.js';
@@ -153,6 +154,9 @@ export const cancelInvoiceWorkflow = ({ req }) =>
     await publishInvoiceCancelledEvent(req, invoice, { session });
     await publishStockAdjustedEvents(req, movements, { session });
 
+    // Cancelling re-renders the PDF (CANCELLED watermark / status) — drop the cache.
+    void invalidateInvoicePdf(invoice);
+
     return invoice;
   });
 
@@ -169,6 +173,9 @@ export const deleteInvoiceWorkflow = ({ req }) =>
     await publishStockAdjustedEvents(req, movements, { session });
     await deleteInvoiceRecord(invoice, { session });
     await refreshCustomerBalanceForInvoice(req, invoice, { session });
+
+    // Document gone — purge any cached PDF.
+    void invalidateInvoicePdf(invoice);
 
     return invoice;
   });

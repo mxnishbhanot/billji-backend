@@ -29,6 +29,29 @@ export const env = {
     user: process.env.SMTP_USER || '',
     pass: process.env.SMTP_PASS || '',
     from: process.env.SMTP_FROM || 'QuickInvoice <no-reply@quickinvoice.local>'
+  },
+  // Resend (https://resend.com) is the active email provider. When apiKey is
+  // unset, email sending is disabled and emailInvoice returns a 503.
+  resend: {
+    apiKey: process.env.RESEND_API_KEY || '',
+    // Must be a verified sender/domain in the Resend dashboard.
+    from: process.env.RESEND_FROM || process.env.SMTP_FROM || 'QuickInvoice <onboarding@resend.dev>'
+  },
+  // Cloudflare R2 (S3-compatible) for caching rendered invoice PDFs. When any of
+  // accountId/accessKeyId/secretAccessKey/bucket is missing the cache is disabled
+  // and PDFs render on demand exactly as before — no behavior change.
+  r2: {
+    accountId: process.env.R2_ACCOUNT_ID || '',
+    accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+    bucket: process.env.R2_BUCKET || '',
+    // Optional explicit endpoint; defaults to https://<accountId>.r2.cloudflarestorage.com
+    endpoint: process.env.R2_ENDPOINT || '',
+    // Optional public base URL (custom domain / r2.dev) for serving cached PDFs
+    // directly. When unset we stream bytes through the API instead.
+    publicBaseUrl: process.env.R2_PUBLIC_BASE_URL || '',
+    // Presigned-URL lifetime in seconds (used when publicBaseUrl is unset).
+    signedUrlTtlSeconds: Number(process.env.R2_SIGNED_URL_TTL_SECONDS || 900)
   }
 };
 

@@ -106,6 +106,7 @@ export const salesDocumentSchema = new mongoose.Schema(
     status: { type: String, enum: LEGACY_INVOICE_STATUSES, default: 'pending', index: true },
     notes: { type: String, default: '', trim: true, maxlength: 1000 },
     pdfUrl: { type: String, default: '' },
+    pdfCacheKey: { type: String, default: '' },
     shareToken: { type: String, required: true, unique: true },
     shareExpiresAt: { type: Date, default: null, index: true },
     shareRevokedAt: { type: Date, default: null, index: true },

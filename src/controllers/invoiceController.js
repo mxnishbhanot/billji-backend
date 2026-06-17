@@ -16,6 +16,8 @@ import {
 import { sendInvoiceEmail } from '../services/emailService.js';
 import { buildInvoiceHtml } from '../services/invoiceHtml.js';
 import { generateInvoicePdf } from '../services/pdfService.js';
+import { getOrRenderInvoicePdf, invalidateInvoicePdf } from '../services/invoicePdfCache.js';
+import { DOMAIN_EVENTS, publishDomainEvent } from '../services/eventBus.js';
 import { resolveInvoiceReminderNotifications } from '../services/notificationService.js';
 import { emitBusinessEvent } from '../services/socketService.js';
 import { logAudit } from '../services/auditService.js';
@@ -181,6 +183,7 @@ export const updateInvoiceStatus = asyncHandler(async (req, res) => {
   invoice.balanceDue = status === 'paid' ? 0 : invoice.total;
   invoice.updatedBy = req.user._id;
   await invoice.save();
+  void invalidateInvoicePdf(invoice);
 
   if (status === 'paid') {
     await resolveInvoiceReminderNotifications(req.business._id, invoice._id);
@@ -206,7 +209,7 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
 
 export const downloadInvoicePdf = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
-  const pdf = await generateInvoicePdf(invoice, req.business);
+  const pdf = await getOrRenderInvoicePdf(invoice, req.business);
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${invoice.invoiceNumber}.pdf"`);
@@ -228,7 +231,7 @@ export const publicInvoicePdf = asyncHandler(async (req, res) => {
     throw new ApiError(410, 'Invoice link has expired');
   }
 
-  const pdf = await generateInvoicePdf(invoice, invoice.business);
+  const pdf = await getOrRenderInvoicePdf(invoice, invoice.business);
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="${invoice.invoiceNumber}.pdf"`);
@@ -237,11 +240,11 @@ export const publicInvoicePdf = asyncHandler(async (req, res) => {
 
 export const whatsappInvoice = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
-  res.json({
-    success: true,
-    link: buildWhatsAppLink(invoice, req),
-    message: buildInvoiceShareMessage(invoice, req)
-  });
+  const [link, message] = await Promise.all([
+    buildWhatsAppLink(invoice, req),
+    buildInvoiceShareMessage(invoice, req)
+  ]);
+  res.json({ success: true, link, message });
 });
 
 export const emailInvoice = asyncHandler(async (req, res) => {
