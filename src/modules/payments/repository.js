@@ -17,6 +17,36 @@ export const createPaymentAllocation = async (payload, { session } = {}) => {
 
 export const createLedgerEntries = (entries, { session } = {}) => LedgerEntry.create(entries, { session, ordered: true });
 
+// Original (non-reversal) ledger entries booked for an invoice — used to build
+// compensating reversal entries on cancel. Excludes prior 'adjustment' reversals.
+export const ledgerEntriesForInvoice = (businessId, invoiceId, { session } = {}) =>
+  LedgerEntry.find({ business: businessId, invoice: invoiceId, sourceType: { $in: ['invoice', 'payment'] } })
+    .session(session || null)
+    .lean();
+
+export const invoiceHasLedgerEntries = (businessId, invoiceId, { session } = {}) =>
+  LedgerEntry.exists({ business: businessId, invoice: invoiceId }).session(session || null);
+
+// Flag receipts recorded against this invoice as refund-pending. Scoped to
+// single-invoice payments (`invoice` field); multi-invoice settlements are left
+// untouched since they remain valid against their other allocations.
+export const markInvoicePaymentsRefundPending = (businessId, invoiceId, { session } = {}) =>
+  Payment.updateMany(
+    { business: businessId, invoice: invoiceId, type: 'receipt', status: 'completed', refundStatus: { $ne: 'pending' } },
+    { $set: { refundStatus: 'pending' } },
+    { session }
+  );
+
+// Any money touched this invoice — direct payment OR an allocation from a
+// multi-invoice payment whose own `invoice` field points elsewhere.
+export const invoiceHasPayments = async (businessId, invoiceId, { session } = {}) => {
+  const [direct, allocated] = await Promise.all([
+    Payment.exists({ business: businessId, invoice: invoiceId }).session(session || null),
+    PaymentAllocation.exists({ business: businessId, invoice: invoiceId }).session(session || null)
+  ]);
+  return Boolean(direct || allocated);
+};
+
 export const allocationTotalForInvoice = async (businessId, invoiceId, { session } = {}) => {
   const result = await PaymentAllocation.aggregate([
     { $match: { business: businessId, invoice: invoiceId } },
@@ -39,8 +69,14 @@ export const customerBalanceTotals = async (businessId, customerId, { session } 
       },
       { $group: { _id: null, total: { $sum: '$total' } } }
     ]).session(session || null),
+    // Exclude allocations tied to cancelled/void invoices: when an invoice is
+    // cancelled we keep its payment + allocation for audit, but that money must
+    // not settle the customer's other open invoices (it is owed back as a
+    // pending refund, tracked on the Payment itself).
     PaymentAllocation.aggregate([
       { $match: { business: businessId, customer: customerId } },
+      { $lookup: { from: 'salesdocuments', localField: 'invoice', foreignField: '_id', as: 'doc' } },
+      { $match: { 'doc.documentStatus': { $nin: ['cancelled', 'void'] } } },
       { $group: { _id: null, total: { $sum: '$amount' } } }
     ]).session(session || null),
     Payment.aggregate([

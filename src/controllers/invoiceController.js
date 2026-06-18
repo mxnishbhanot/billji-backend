@@ -1,7 +1,7 @@
 import { body, query } from 'express-validator';
 import crypto from 'crypto';
 import Invoice from '../models/Invoice.js';
-import { cancelInvoiceWorkflow, createInvoiceWorkflow, deleteInvoiceWorkflow, duplicateInvoiceWorkflow } from '../modules/invoices/service.js';
+import { cancelInvoiceWorkflow, computeInvoiceEligibility, createInvoiceWorkflow, deleteInvoiceWorkflow, duplicateInvoiceWorkflow } from '../modules/invoices/service.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import {
@@ -161,7 +161,8 @@ export const previewInvoice = asyncHandler(async (req, res) => {
 
 export const getInvoice = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
-  res.json({ success: true, invoice: serializeInvoice(invoice, req) });
+  const eligibility = await computeInvoiceEligibility(req.business._id, invoice);
+  res.json({ success: true, invoice: { ...serializeInvoice(invoice, req), eligibility } });
 });
 
 export const updateInvoiceStatus = asyncHandler(async (req, res) => {

@@ -108,7 +108,7 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
           <div class="item-name">${escapeHtml(item.name)}</div>
           ${item.sku ? `<div class="item-sku">SKU: ${escapeHtml(item.sku)}</div>` : ''}
         </td>
-        <td class="c-qty">${escapeHtml(item.quantity)}</td>
+        <td class="c-qty">${escapeHtml(item.unit ? `${item.quantity} ${item.unit}` : item.quantity)}</td>
         <td class="c-rate">${currency(item.price)}</td>
         <td class="c-amt">${currency(item.total)}</td>
       </tr>`

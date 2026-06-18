@@ -110,7 +110,11 @@ export const salesDocumentSchema = new mongoose.Schema(
     shareToken: { type: String, required: true, unique: true },
     shareExpiresAt: { type: Date, default: null, index: true },
     shareRevokedAt: { type: Date, default: null, index: true },
-    emailedAt: { type: Date, default: null }
+    emailedAt: { type: Date, default: null },
+    // Audit trail for cancellation (cancel preserves the document; never physically deleted).
+    cancelledAt: { type: Date, default: null },
+    cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    cancelReason: { type: String, default: '', trim: true, maxlength: 500 }
   },
   { timestamps: true }
 );

@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 export const PAYMENT_METHODS = ['cash', 'upi', 'bank_transfer', 'card', 'cheque', 'wallet', 'other'];
 export const PAYMENT_STATUSES = ['pending', 'completed', 'failed', 'refunded'];
 export const PAYMENT_TYPES = ['receipt', 'refund'];
+export const REFUND_STATUSES = ['none', 'pending', 'processed'];
 
 const paymentStatusHistorySchema = new mongoose.Schema(
   {
@@ -35,6 +36,9 @@ const paymentSchema = new mongoose.Schema(
     type: { type: String, enum: PAYMENT_TYPES, default: 'receipt', index: true },
     method: { type: String, enum: PAYMENT_METHODS, default: 'cash', index: true },
     status: { type: String, enum: PAYMENT_STATUSES, default: 'completed', index: true },
+    // Refund lifecycle. Set to 'pending' when an invoice with this payment is cancelled
+    // (we never auto-refund); business settles the refund out-of-band and marks 'processed'.
+    refundStatus: { type: String, enum: REFUND_STATUSES, default: 'none', index: true },
     amount: { type: Number, required: true, min: 0 },
     allocatedAmount: { type: Number, default: 0, min: 0 },
     unappliedAmount: { type: Number, default: 0, min: 0 },
