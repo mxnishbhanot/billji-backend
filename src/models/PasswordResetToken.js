@@ -6,6 +6,7 @@ const passwordResetTokenSchema = new mongoose.Schema(
     tokenHash: { type: String, required: true, unique: true },
     expiresAt: { type: Date, required: true },
     usedAt: { type: Date, default: null },
+    attempts: { type: Number, default: 0 },
     requestedIp: { type: String, default: '', trim: true, maxlength: 80 }
   },
   { timestamps: true }

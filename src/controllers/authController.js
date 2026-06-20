@@ -8,6 +8,7 @@ import User from '../models/User.js';
 import { env, isProduction } from '../config/env.js';
 import { permissionsForMembership } from '../middlewares/authorization.js';
 import { logAudit } from '../services/auditService.js';
+import { sendPasswordResetEmail } from '../services/emailService.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { refreshTokenExpiresAt, signAccessToken, signRefreshToken, tokenHash, verifyRefreshToken } from '../utils/jwt.js';
@@ -54,6 +55,9 @@ const publicUser = async (user, business, membership = null) => ({
 
 const requestIp = (req) => req.ip || req.headers['x-forwarded-for']?.split(',')?.[0]?.trim() || '';
 const requestUserAgent = (req) => req.get('user-agent') || '';
+// Mobile clients send a friendly device label (e.g. "Samsung Galaxy S21 · Android 14")
+// since the user-agent carries no model. Cap length to match the schema.
+const requestDeviceName = (req) => (req.get('x-device-name') || '').trim().slice(0, 120);
 
 const sessionResponse = async ({ req, user, business }) => {
   if (!business) throw new ApiError(403, 'No active business found for this account');
@@ -66,6 +70,7 @@ const sessionResponse = async ({ req, user, business }) => {
     refreshTokenId,
     refreshTokenExpiresAt: refreshTokenExpiresAt(),
     userAgent: requestUserAgent(req),
+    deviceName: requestDeviceName(req),
     ipAddress: requestIp(req),
     lastUsedAt: new Date()
   });
@@ -104,9 +109,35 @@ export const resetRequestRules = [
 ];
 
 export const resetConfirmRules = [
-  body('token').notEmpty().withMessage('Reset token is required'),
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
+  body('code').trim().matches(/^\d{6}$/).withMessage('Enter the 6-digit code from your email'),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
 ];
+
+// Max wrong-code guesses before the code is burned — keeps a 6-digit code from
+// being brute-forced within its TTL.
+const MAX_RESET_ATTEMPTS = 5;
+
+// Generate a 6-digit numeric code, store its hash. Retries on the rare unique
+// tokenHash collision (two users drawing the same code while both are active).
+const createResetCode = async ({ user, requestedIp }) => {
+  for (let i = 0; i < 5; i += 1) {
+    const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
+    try {
+      await PasswordResetToken.create({
+        user: user._id,
+        tokenHash: tokenHash(code),
+        expiresAt: new Date(Date.now() + env.passwordResetTtlMinutes * 60 * 1000),
+        requestedIp
+      });
+      return code;
+    } catch (err) {
+      if (err?.code === 11000) continue; // duplicate hash — draw another code
+      throw err;
+    }
+  }
+  throw new ApiError(500, 'Could not generate a reset code, please try again');
+};
 
 export const sessionIdRules = [
   param('sessionId').isMongoId().withMessage('Valid session id is required')
@@ -218,6 +249,7 @@ export const refreshSession = asyncHandler(async (req, res) => {
   session.refreshTokenExpiresAt = refreshTokenExpiresAt();
   session.lastUsedAt = new Date();
   session.userAgent = requestUserAgent(req) || session.userAgent;
+  session.deviceName = requestDeviceName(req) || session.deviceName;
   session.ipAddress = requestIp(req) || session.ipAddress;
   await session.save();
 
@@ -250,6 +282,7 @@ export const listSessions = asyncHandler(async (req, res) => {
       id: session._id,
       business: session.business,
       userAgent: session.userAgent,
+      deviceName: session.deviceName,
       ipAddress: session.ipAddress,
       lastUsedAt: session.lastUsedAt,
       createdAt: session.createdAt,
@@ -271,37 +304,60 @@ export const revokeSession = asyncHandler(async (req, res) => {
 
 export const requestPasswordReset = asyncHandler(async (req, res) => {
   const user = await User.findOne({ email: req.body.email });
-  let resetToken = null;
+  let resetCode = null;
 
   if (user) {
-    resetToken = crypto.randomBytes(32).toString('hex');
-    await PasswordResetToken.create({
-      user: user._id,
-      tokenHash: tokenHash(resetToken),
-      expiresAt: new Date(Date.now() + env.passwordResetTtlMinutes * 60 * 1000),
-      requestedIp: requestIp(req)
-    });
+    // Invalidate any earlier unused codes so only the freshest one works.
+    await PasswordResetToken.updateMany(
+      { user: user._id, usedAt: null },
+      { usedAt: new Date() }
+    );
+    resetCode = await createResetCode({ user, requestedIp: requestIp(req) });
     void logAudit(req, { action: 'auth.password_reset_requested', resourceType: 'user', resourceId: user._id });
+
+    try {
+      await sendPasswordResetEmail({
+        to: user.email,
+        name: user.name,
+        code: resetCode,
+        ttlMinutes: env.passwordResetTtlMinutes
+      });
+    } catch (err) {
+      // Don't leak account existence or email-provider state to the client; the
+      // response is identical whether or not the email went out.
+      console.error('[password-reset] failed to send reset email:', err?.message || err);
+    }
   }
 
   res.json({
     success: true,
-    message: 'If an account exists, a password reset link has been prepared.',
-    resetToken: !isProduction ? resetToken : undefined
+    message: 'If an account exists for that email, a reset code is on its way.',
+    // Dev convenience only — never expose the code in production.
+    resetCode: !isProduction ? resetCode : undefined
   });
 });
 
 export const confirmPasswordReset = asyncHandler(async (req, res) => {
-  const reset = await PasswordResetToken.findOne({
-    tokenHash: tokenHash(req.body.token),
-    usedAt: null,
-    expiresAt: { $gt: new Date() }
-  });
+  const user = await User.findOne({ email: req.body.email }).select('+password');
+  // Look up the user's latest live code regardless of whether the user exists,
+  // and return the same 422 either way so we don't reveal which emails are real.
+  const reset = user
+    ? await PasswordResetToken.findOne({ user: user._id, usedAt: null, expiresAt: { $gt: new Date() } }).sort({ createdAt: -1 })
+    : null;
 
-  if (!reset) throw new ApiError(422, 'Password reset token is invalid or expired');
+  if (!user || !reset) throw new ApiError(422, 'Reset code is invalid or expired');
 
-  const user = await User.findById(reset.user).select('+password');
-  if (!user) throw new ApiError(404, 'User not found');
+  if (reset.attempts >= MAX_RESET_ATTEMPTS) {
+    reset.usedAt = new Date();
+    await reset.save();
+    throw new ApiError(429, 'Too many incorrect attempts. Request a new code.');
+  }
+
+  if (reset.tokenHash !== tokenHash(req.body.code)) {
+    reset.attempts += 1;
+    await reset.save();
+    throw new ApiError(422, 'Reset code is invalid or expired');
+  }
 
   user.password = req.body.password;
   await user.save();

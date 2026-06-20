@@ -210,6 +210,9 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
 
 export const downloadInvoicePdf = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
+  if (invoice.status === 'cancelled') {
+    throw new ApiError(409, 'Cancelled invoices cannot be shared or sent');
+  }
   const pdf = await getOrRenderInvoicePdf(invoice, req.business);
 
   res.setHeader('Content-Type', 'application/pdf');
@@ -241,6 +244,9 @@ export const publicInvoicePdf = asyncHandler(async (req, res) => {
 
 export const whatsappInvoice = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
+  if (invoice.status === 'cancelled') {
+    throw new ApiError(409, 'Cancelled invoices cannot be shared or sent');
+  }
   const [link, message] = await Promise.all([
     buildWhatsAppLink(invoice, req),
     buildInvoiceShareMessage(invoice, req)
@@ -250,6 +256,9 @@ export const whatsappInvoice = asyncHandler(async (req, res) => {
 
 export const emailInvoice = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
+  if (invoice.status === 'cancelled') {
+    throw new ApiError(409, 'Cancelled invoices cannot be shared or sent');
+  }
   const result = await sendInvoiceEmail({ invoice, business: req.business, to: req.body.email, pdfUrl: buildPublicInvoicePdfUrl(invoice, req) });
   await publishDomainEvent({
     business: req.business._id,
@@ -274,6 +283,9 @@ export const emailInvoice = asyncHandler(async (req, res) => {
 
 export const rotateInvoiceShareLink = asyncHandler(async (req, res) => {
   const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
+  if (invoice.status === 'cancelled') {
+    throw new ApiError(409, 'Cancelled invoices cannot be shared or sent');
+  }
   invoice.shareToken = crypto.randomBytes(24).toString('hex');
   invoice.shareExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   invoice.shareRevokedAt = null;

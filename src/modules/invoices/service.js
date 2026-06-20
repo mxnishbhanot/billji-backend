@@ -181,6 +181,9 @@ export const cancelInvoiceWorkflow = ({ req }) =>
     invoice.documentStatus = 'cancelled';
     invoice.cancelledAt = new Date();
     invoice.cancelledBy = req.user._id;
+    // Revoke any public share link so a cancelled invoice can't be sent/viewed
+    // through a previously-issued link.
+    invoice.shareRevokedAt = new Date();
     if (typeof req.body?.cancelReason === 'string') {
       invoice.cancelReason = req.body.cancelReason.trim().slice(0, 500);
     }

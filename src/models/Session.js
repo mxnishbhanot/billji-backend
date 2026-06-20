@@ -8,6 +8,7 @@ const sessionSchema = new mongoose.Schema(
     refreshTokenId: { type: String, required: true, index: true },
     refreshTokenExpiresAt: { type: Date, required: true, index: true },
     userAgent: { type: String, default: '', trim: true, maxlength: 500 },
+    deviceName: { type: String, default: '', trim: true, maxlength: 120 },
     ipAddress: { type: String, default: '', trim: true, maxlength: 80 },
     lastUsedAt: { type: Date, default: Date.now },
     revokedAt: { type: Date, default: null, index: true },
