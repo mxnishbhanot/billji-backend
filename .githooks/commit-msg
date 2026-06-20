@@ -1,0 +1,32 @@
+#!/bin/sh
+# Humanoid commit gate. Keeps commit subjects readable so testers can tell
+# what each dev build contains (these subjects become the Discord release notes).
+#
+# Enforced: Conventional-style subject -> type(scope): summary, <=72 chars.
+# Bypass for one commit: git commit --no-verify
+
+msg_file="$1"
+subject=$(grep -v '^#' "$msg_file" | sed '/^[[:space:]]*$/d' | head -1)
+
+case "$subject" in
+  Merge*|Revert*|fixup!*|squash!*|"") exit 0 ;;
+esac
+
+pattern='^(feat|fix|chore|docs|refactor|test|perf|style|ci|build)(\([a-z0-9_./-]+\))?: .{3,}'
+if ! printf '%s' "$subject" | grep -Eq "$pattern"; then
+  echo "✗ Commit subject not humanoid."
+  echo "  Format: type(scope): summary   (>=3 char summary)"
+  echo "  types:  feat fix chore docs refactor test perf style ci build"
+  echo "  good:   feat(invoices): add WhatsApp PDF share"
+  echo "  yours:  $subject"
+  echo "  (bypass once with --no-verify)"
+  exit 1
+fi
+
+len=$(printf '%s' "$subject" | wc -c)
+if [ "$len" -gt 72 ]; then
+  echo "✗ Subject too long ($len > 72 chars). Tighten it; put detail in the body."
+  exit 1
+fi
+
+exit 0

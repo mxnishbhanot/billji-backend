@@ -5,6 +5,7 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks || exit 0",
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "seed": "node src/seed/index.js",

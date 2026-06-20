@@ -1,0 +1,4 @@
+# Git hooks + node scripts must use LF (run on Linux CI / mac).
+.githooks/** text eol=lf
+*.mjs text eol=lf
+*.sh text eol=lf
