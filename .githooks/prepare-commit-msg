@@ -1,0 +1,23 @@
+#!/bin/sh
+# Scaffold a humanoid commit template so authors note WHY + WHAT TO TEST.
+# Only for plain `git commit` (skips -m, merges, amends, templates).
+
+msg_file="$1"
+src="$2"
+[ -n "$src" ] && exit 0
+
+# Don't append if there is already real content.
+if grep -qv '^#' "$msg_file" 2>/dev/null && [ -s "$msg_file" ]; then
+  first=$(grep -v '^#' "$msg_file" | sed '/^[[:space:]]*$/d' | head -1)
+  [ -n "$first" ] && exit 0
+fi
+
+cat >> "$msg_file" <<'TMPL'
+
+# --- humanoid commit (lines starting with # are ignored) ---
+# Subject: type(scope): what changed   e.g. feat(invoices): add PDF share
+#   types: feat fix chore docs refactor test perf style ci build
+# Body (helps testers reading the build notes):
+#   Why:  problem solved / reason for change
+#   Test: what a tester should check in the new build
+TMPL
