@@ -49,6 +49,11 @@ const tint = (hex, ratio) => {
   return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
 };
 
+// Shown under NOTES & TERMS when the business hasn't set its own default notes
+// and the invoice itself carries none. Exported so the app can pre-fill the
+// settings field with the same copy.
+export const DEFAULT_INVOICE_NOTES = 'Please make payment by the due date. Quote the invoice number when paying.';
+
 const resolveTemplate = (business = {}) => {
   const tpl = business.invoiceTemplate || {};
   return {
@@ -56,7 +61,8 @@ const resolveTemplate = (business = {}) => {
     showLogo: tpl.showLogo !== false,
     showNotes: tpl.showNotes !== false,
     showSignature: tpl.showSignature !== false,
-    showPaymentRows: tpl.showPaymentRows !== false
+    showPaymentRows: tpl.showPaymentRows !== false,
+    notes: typeof tpl.notes === 'string' ? tpl.notes.trim() : ''
   };
 };
 
@@ -75,8 +81,18 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   const accent = tpl.accentColor;
   const customer = invoice.customerSnapshot || {};
 
-  const paidAmount = Number(invoice.paidAmount ?? (invoice.paymentStatus === 'paid' ? invoice.total : 0));
-  const balanceDue = Number(invoice.balanceDue ?? Math.max(Number(invoice.total || 0) - paidAmount, 0));
+  // paymentStatus is authoritative: a 'paid' invoice always renders fully paid and
+  // 'unpaid' renders zero, even if the denormalized paidAmount/balanceDue are stale
+  // or missing. Only 'partial' trusts the stored amount.
+  const invoiceTotal = Number(invoice.total || 0);
+  const paymentStatus = invoice.paymentStatus;
+  const paidAmount =
+    paymentStatus === 'paid' ? invoiceTotal
+    : paymentStatus === 'unpaid' ? 0
+    : Number(invoice.paidAmount ?? 0);
+  const balanceDue =
+    paymentStatus === 'paid' ? 0
+    : Number(invoice.balanceDue ?? Math.max(invoiceTotal - paidAmount, 0));
   const discountAmount = Number(invoice.discount?.amount || 0);
   const taxAmount = Number(invoice.tax?.amount || 0);
   const taxRate = Number(invoice.tax?.rate || 0);
@@ -85,9 +101,13 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     ? `<img class="logo" src="${business.logoUrl}" alt="logo" />`
     : '';
 
+  // Due date is rarely set in-app, so it printed a meaningless "On receipt" on most
+  // receipts. When there's no real due date, show the amount paid instead — concrete
+  // info the customer can use.
+  const dueDateText = formatDate(invoice.dueDate);
   const metaCells = [
     ['Issue date', formatDate(invoice.date) || '-'],
-    ['Due date', formatDate(invoice.dueDate) || 'On receipt'],
+    dueDateText ? ['Due date', dueDateText] : ['Amount paid', currency(paidAmount)],
     ['Payment', statusText(invoice.paymentStatus || invoice.status || 'unpaid')]
   ];
   if (tpl.showPaymentRows) metaCells.push(['Balance', currency(balanceDue)]);
@@ -125,16 +145,18 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     ? `<div class="t-balance"><span>Balance due</span><span>${currency(balanceDue)}</span></div>`
     : '';
 
-  const notes = invoice.notes || 'Please make payment by the due date. Quote the invoice number when paying.';
+  // Per-invoice notes win; else the business's saved default; else the built-in copy.
+  const notes = (invoice.notes && invoice.notes.trim()) || tpl.notes || DEFAULT_INVOICE_NOTES;
+  // With the signature block on, leave room for a handwritten signatory line.
+  // With it off, state that the invoice is system-generated so the empty space
+  // reads as intentional and professional instead of a missing signature.
+  const signBlock = tpl.showSignature
+    ? '<div class="sign"><div class="sign-line"></div><div class="sign-text">Authorized signatory</div></div>'
+    : '<div class="sign sign-auto"><div class="sign-note">This is an electronically generated invoice;<br/>no signature is required.</div></div>';
   const footerInner = `
     ${tpl.showNotes ? `<div class="notes"><div class="party-label">NOTES &amp; TERMS</div><div class="notes-text">${escapeHtml(notes)}</div></div>` : '<div class="notes"></div>'}
-    ${tpl.showSignature ? '<div class="sign"><div class="sign-line"></div><div class="sign-text">Authorized signatory</div></div>' : ''}
+    ${signBlock}
   `;
-
-  // `screen` mode (mobile preview, fits a WebView at 794 CSS px wide) lets the page
-  // grow to content height; `print` mode (PDF) fills a full A4 sheet. Typography and
-  // layout are identical so the two render the same.
-  const screen = options.mode === 'screen';
 
   return `<!doctype html>
 <html>
@@ -149,8 +171,11 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     font-family: 'Segoe UI', system-ui, -apple-system, Roboto, 'Helvetica Neue', Arial, sans-serif;
     color: #0f172a; -webkit-font-smoothing: antialiased; font-size: 13px; line-height: 1.45;
   }
+  /* Always a full A4 sheet so the on-screen preview maps 1:1 into the A4-ratio
+     preview frame — the footer, signature and notes sit in the same place the
+     PDF puts them instead of falling outside a content-height page. */
   .page {
-    background: #fff; width: 794px; min-height: ${screen ? 'auto' : '1123px'};
+    background: #fff; width: 794px; min-height: 1123px;
     margin: 0 auto; padding: 48px 46px 36px;
     display: flex; flex-direction: column;
   }
@@ -206,12 +231,16 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   .sign { width: 170px; text-align: center; }
   .sign-line { border-top: 1px solid #cbd5e1; margin-bottom: 5px; }
   .sign-text { font-size: 10px; color: #94a3b8; }
+  .sign-auto { width: 210px; text-align: right; }
+  .sign-note { font-size: 10px; font-style: italic; color: #94a3b8; line-height: 1.5; }
 
   .spacer { flex: 1; }
   .brand-footer { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #e2e8f0; padding-top: 10px; margin-top: 28px; }
   .brand-side { flex: 1; font-size: 9.5px; color: #94a3b8; }
   .brand-side.right { text-align: right; }
   .brand-name { flex: 1; text-align: center; font-size: 10px; font-weight: 700; color: #0f172a; }
+  .brand-bill { color: #0A2540; font-weight: 800; }
+  .brand-ji { color: #1E7FFF; font-weight: 800; }
 </style>
 </head>
 <body>
@@ -249,12 +278,12 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
 
     <div class="totals"><div class="totals-box">${totalRows.join('')}${balanceHtml}</div></div>
 
-    ${tpl.showNotes || tpl.showSignature ? `<div class="footer-block">${footerInner}</div>` : ''}
+    <div class="footer-block">${footerInner}</div>
 
     <div class="spacer"></div>
     <div class="brand-footer">
       <div class="brand-side">Page 1</div>
-      <div class="brand-name">Powered by BillJi</div>
+      <div class="brand-name">Powered by <span class="brand-bill">Bill</span><span class="brand-ji">Ji</span></div>
       <div class="brand-side right">Electronically generated</div>
     </div>
   </div>

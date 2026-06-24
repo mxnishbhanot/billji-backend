@@ -53,6 +53,10 @@ const publicUser = async (user, business, membership = null) => ({
   createdAt: user.createdAt
 });
 
+// Max concurrent active sessions (logged-in devices) per user. On a new login
+// beyond this, the oldest sessions are revoked so only the freshest 3 survive.
+const MAX_ACTIVE_SESSIONS = 3;
+
 const requestIp = (req) => req.ip || req.headers['x-forwarded-for']?.split(',')?.[0]?.trim() || '';
 const requestUserAgent = (req) => req.get('user-agent') || '';
 // Mobile clients send a friendly device label (e.g. "Samsung Galaxy S21 · Android 14")
@@ -78,6 +82,19 @@ const sessionResponse = async ({ req, user, business }) => {
   const refreshToken = signRefreshToken({ userId: user._id, sessionId: session._id, refreshTokenId });
   session.refreshTokenHash = tokenHash(refreshToken);
   await session.save();
+
+  // Enforce the concurrent-session cap: keep the newest MAX_ACTIVE_SESSIONS,
+  // revoke any older active sessions for this user.
+  const stale = await Session.find({ user: user._id, revokedAt: null })
+    .sort({ lastUsedAt: -1 })
+    .skip(MAX_ACTIVE_SESSIONS)
+    .select('_id');
+  if (stale.length) {
+    await Session.updateMany(
+      { _id: { $in: stale.map((s) => s._id) } },
+      { revokedAt: new Date(), revokedReason: 'max_sessions_exceeded' }
+    );
+  }
 
   return {
     success: true,
@@ -167,7 +184,8 @@ export const settingsRules = [
   body('invoiceTemplate.showLogo').optional().isBoolean(),
   body('invoiceTemplate.showNotes').optional().isBoolean(),
   body('invoiceTemplate.showSignature').optional().isBoolean(),
-  body('invoiceTemplate.showPaymentRows').optional().isBoolean()
+  body('invoiceTemplate.showPaymentRows').optional().isBoolean(),
+  body('invoiceTemplate.notes').optional({ nullable: true }).isString().isLength({ max: 1000 }).withMessage('Notes must be 1000 characters or fewer')
 ];
 
 export const register = asyncHandler(async (req, res) => {
@@ -305,6 +323,7 @@ export const revokeSession = asyncHandler(async (req, res) => {
 export const requestPasswordReset = asyncHandler(async (req, res) => {
   const user = await User.findOne({ email: req.body.email });
   let resetCode = null;
+  let emailError = null;
 
   if (user) {
     // Invalidate any earlier unused codes so only the freshest one works.
@@ -326,14 +345,16 @@ export const requestPasswordReset = asyncHandler(async (req, res) => {
       // Don't leak account existence or email-provider state to the client; the
       // response is identical whether or not the email went out.
       console.error('[password-reset] failed to send reset email:', err?.message || err);
+      emailError = err?.message || String(err);
     }
   }
 
   res.json({
     success: true,
     message: 'If an account exists for that email, a reset code is on its way.',
-    // Dev convenience only — never expose the code in production.
-    resetCode: !isProduction ? resetCode : undefined
+    // Dev convenience only — never expose the code or provider errors in production.
+    resetCode: !isProduction ? resetCode : undefined,
+    emailError: !isProduction ? emailError : undefined
   });
 });
 
@@ -392,6 +413,7 @@ export const updateSettings = asyncHandler(async (req, res) => {
     if (tpl.showNotes !== undefined) req.business.invoiceTemplate.showNotes = Boolean(tpl.showNotes);
     if (tpl.showSignature !== undefined) req.business.invoiceTemplate.showSignature = Boolean(tpl.showSignature);
     if (tpl.showPaymentRows !== undefined) req.business.invoiceTemplate.showPaymentRows = Boolean(tpl.showPaymentRows);
+    if (tpl.notes !== undefined) req.business.invoiceTemplate.notes = String(tpl.notes || '').slice(0, 1000);
   }
 
   await req.business.save();

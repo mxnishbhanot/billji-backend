@@ -32,7 +32,9 @@ const SAMPLE_INVOICE = {
   total: 8496,
   paidAmount: 4032,
   balanceDue: 4464,
-  notes: 'Thank you for your business. Please pay within 7 days.'
+  // Left blank so the preview shows the business's saved notes (or the default),
+  // letting the user see exactly what their custom notes will look like.
+  notes: ''
 };
 
 // Returns the live invoice HTML (same template the PDF uses) for the mobile WebView

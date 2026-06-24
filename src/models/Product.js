@@ -9,7 +9,7 @@ const productSchema = new mongoose.Schema(
     price: { type: Number, required: true, min: 0 },
     salePrice: { type: Number, min: 0 },
     purchasePrice: { type: Number, default: 0, min: 0 },
-    stockQuantity: { type: Number, required: true, default: 0 },
+    stockQuantity: { type: Number, required: true, default: 0, min: 0 },
     sku: { type: String, trim: true, maxlength: 64, default: '' },
     category: { type: String, trim: true, maxlength: 80, default: '' },
     unit: { type: String, trim: true, maxlength: 24, default: 'pcs' },

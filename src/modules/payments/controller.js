@@ -1,5 +1,6 @@
 import { serializeInvoice } from '../../services/invoiceService.js';
 import { logAudit } from '../../services/auditService.js';
+import { invalidateInvoicePdf } from '../../services/invoicePdfCache.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import {
   getCustomerOutstanding,
@@ -22,6 +23,8 @@ export const listBusinessPayments = asyncHandler(async (req, res) => {
 
 export const recordInvoicePayment = asyncHandler(async (req, res) => {
   const result = await recordInvoicePaymentWorkflow({ req });
+  // Paid/balance changed — drop any cached PDF so the next render reflects payment.
+  void invalidateInvoicePdf(result.invoice);
   void logAudit(req, {
     action: 'payment.recorded',
     resourceType: 'payment',
@@ -45,6 +48,8 @@ export const listCustomerOutstanding = asyncHandler(async (req, res) => {
 
 export const recordCustomerPayment = asyncHandler(async (req, res) => {
   const result = await recordCustomerPaymentWorkflow({ req });
+  // Every allocated invoice's paid/balance changed — invalidate each cached PDF.
+  result.invoices.forEach((invoice) => void invalidateInvoicePdf(invoice));
   void logAudit(req, {
     action: 'payment.recorded',
     resourceType: 'payment',

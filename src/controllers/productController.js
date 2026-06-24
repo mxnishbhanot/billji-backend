@@ -16,7 +16,7 @@ export const productRules = [
   body('price').isFloat({ min: 0 }).withMessage('Price must be zero or greater'),
   body('salePrice').optional().isFloat({ min: 0 }),
   body('purchasePrice').optional().isFloat({ min: 0 }),
-  body('stockQuantity').isInt().withMessage('Stock quantity must be a whole number'),
+  body('stockQuantity').isInt({ min: 0 }).withMessage('Stock quantity must be zero or greater'),
   body('sku').optional({ nullable: true }).trim().isLength({ max: 64 }),
   body('category').optional({ nullable: true }).trim().isLength({ max: 80 }),
   body('unit').optional({ nullable: true }).trim().isLength({ max: 24 }),

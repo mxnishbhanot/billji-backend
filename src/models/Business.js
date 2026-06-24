@@ -26,7 +26,8 @@ const businessSchema = new mongoose.Schema(
       showLogo: { type: Boolean, default: true },
       showNotes: { type: Boolean, default: true },
       showSignature: { type: Boolean, default: true },
-      showPaymentRows: { type: Boolean, default: true }
+      showPaymentRows: { type: Boolean, default: true },
+      notes: { type: String, default: '', trim: true, maxlength: 1000 }
     },
     theme: { type: String, enum: ['light', 'dark'], default: 'light' },
     status: { type: String, enum: ['active', 'suspended'], default: 'active', index: true }

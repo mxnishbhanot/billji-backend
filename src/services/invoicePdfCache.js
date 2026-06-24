@@ -26,12 +26,16 @@ export const invoicePdfCacheKey = (invoice) =>
 
 // Best-effort persistence of the current cache key onto the document so we can
 // later delete the exact object on invalidate. Never throws into the caller.
+// Persisted via updateOne with timestamps:false — a plain save() would bump
+// updatedAt, which feeds the version stamp in the key, so the NEXT request would
+// compute a different key and always miss the cache. We must not move updatedAt.
 const rememberCacheKey = async (invoice, key) => {
   if (invoice.pdfCacheKey === key) return;
+  if (typeof invoice.updateOne !== 'function') return;
   const previousKey = invoice.pdfCacheKey;
-  invoice.pdfCacheKey = key;
+  invoice.pdfCacheKey = key; // keep the in-memory doc in sync; updatedAt untouched
   try {
-    await invoice.save({ validateBeforeSave: false });
+    await invoice.updateOne({ $set: { pdfCacheKey: key } }, { timestamps: false });
     if (previousKey && previousKey !== key) {
       deleteObject(previousKey).catch(() => {});
     }
