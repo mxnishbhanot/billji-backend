@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import {
   confirmPasswordReset,
+  googleRules,
+  googleSignIn,
   login,
   loginRules,
   logout,
@@ -27,6 +29,7 @@ const router = Router();
 
 router.post('/register', authLimiter, registerRules, validate, register);
 router.post('/login', authLimiter, loginRules, validate, login);
+router.post('/google', authLimiter, googleRules, validate, googleSignIn);
 router.post('/refresh', refreshRules, validate, refreshSession);
 router.post('/logout', protect, logout);
 router.get('/sessions', protect, listSessions);

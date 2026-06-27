@@ -6,6 +6,7 @@ import PasswordResetToken from '../models/PasswordResetToken.js';
 import Session from '../models/Session.js';
 import User from '../models/User.js';
 import { env, isProduction } from '../config/env.js';
+import { verifyGoogleIdToken } from '../config/firebase.js';
 import { permissionsForMembership } from '../middlewares/authorization.js';
 import { logAudit } from '../services/auditService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
@@ -121,6 +122,10 @@ export const refreshRules = [
   body('refreshToken').notEmpty().withMessage('Refresh token is required')
 ];
 
+export const googleRules = [
+  body('idToken').isString().trim().notEmpty().withMessage('Google ID token is required')
+];
+
 export const resetRequestRules = [
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail()
 ];
@@ -233,6 +238,47 @@ export const login = asyncHandler(async (req, res) => {
   const session = await sessionResponse({ req, user, business });
   void logAudit(req, { action: 'auth.login', resourceType: 'user', resourceId: user._id });
   res.json(session);
+});
+
+export const googleSignIn = asyncHandler(async (req, res) => {
+  const decoded = await verifyGoogleIdToken(req.body.idToken);
+  const email = decoded.email?.toLowerCase();
+  if (!email) throw new ApiError(401, 'Google account has no email');
+  if (decoded.email_verified === false) throw new ApiError(401, 'Google email is not verified');
+
+  let user = await User.findOne({ email });
+  let isNewUser = false;
+
+  if (!user) {
+    // First Google sign-in for this email: provision a user + business + owner
+    // membership, mirroring the email/password register flow. The schema requires
+    // a password, so set a random one the user never sees (they sign in via Google).
+    const name = decoded.name || email.split('@')[0];
+    user = await User.create({
+      name,
+      email,
+      password: crypto.randomBytes(32).toString('hex')
+    });
+    const business = await Business.create({
+      owner: user._id,
+      businessName: `${name}'s Business`,
+      email
+    });
+    await BusinessMember.create({
+      business: business._id,
+      user: user._id,
+      roleKey: 'owner',
+      joinedAt: new Date()
+    });
+    user.defaultBusiness = business._id;
+    await user.save();
+    isNewUser = true;
+  }
+
+  const business = await Business.findById(user.defaultBusiness);
+  const session = await sessionResponse({ req, user, business });
+  void logAudit(req, { action: isNewUser ? 'auth.google_registered' : 'auth.google_login', resourceType: 'user', resourceId: user._id });
+  res.status(isNewUser ? 201 : 200).json(session);
 });
 
 export const me = asyncHandler(async (req, res) => {
