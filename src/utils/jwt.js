@@ -25,6 +25,24 @@ export const signRefreshToken = ({ userId, sessionId, refreshTokenId }) =>
     expiresIn: env.refreshTokenExpiresIn
   });
 
+// Short-lived token issued after a password/Google credential passes but before
+// 2FA is satisfied. It authorizes only the /auth/2fa/verify step — never a
+// protected API call — so it is signed with the access secret but carries typ='2fa'.
+export const signChallengeToken = ({ userId, method }) =>
+  jwt.sign({ sub: userId.toString(), method, jti: crypto.randomUUID(), typ: '2fa' }, env.jwtSecret, {
+    expiresIn: `${env.twoFactor.challengeTtlMinutes}m`
+  });
+
+export const verifyChallengeToken = (token) => {
+  const decoded = jwt.verify(token, env.jwtSecret);
+  if (decoded.typ !== '2fa') {
+    const err = new Error('Not a 2FA challenge token');
+    err.name = 'JsonWebTokenError';
+    throw err;
+  }
+  return decoded;
+};
+
 export const signToken = (userId, sessionId) => signAccessToken({ userId, sessionId });
 export const verifyToken = (token) => jwt.verify(token, env.jwtSecret);
 export const verifyRefreshToken = (token) => jwt.verify(token, env.refreshTokenSecret);

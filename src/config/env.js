@@ -19,6 +19,18 @@ export const env = {
   refreshTokenSecret: process.env.REFRESH_TOKEN_SECRET || process.env.JWT_SECRET || 'dev-only-change-me-refresh',
   refreshTokenExpiresIn: process.env.REFRESH_TOKEN_EXPIRES_IN || '30d',
   passwordResetTtlMinutes: Number(process.env.PASSWORD_RESET_TTL_MINUTES || 30),
+  twoFactor: {
+    // Human-readable issuer shown in authenticator apps (Google Authenticator etc.).
+    issuer: process.env.TWO_FACTOR_ISSUER || 'BillJi',
+    // Lifetime of the intermediate login challenge + email OTP codes.
+    challengeTtlMinutes: Number(process.env.TWO_FACTOR_CHALLENGE_TTL_MINUTES || 5),
+    // How long a device stays trusted after passing 2FA (skips the code on next login).
+    trustedDeviceDays: Number(process.env.TWO_FACTOR_TRUSTED_DEVICE_DAYS || 30),
+    // Base64/hex 32-byte key that encrypts TOTP secrets at rest (AES-256-GCM). When
+    // unset the key is derived from JWT_SECRET via scrypt — fine for dev, but set a
+    // dedicated key in production so rotating JWT_SECRET doesn't lock users out of 2FA.
+    encKey: process.env.TWO_FACTOR_ENC_KEY || ''
+  },
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
   corsOrigins: parseOrigins(process.env.CORS_ORIGINS || process.env.CLIENT_URL || 'http://localhost:5173'),
   apiPublicUrl: process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 5000}`,
