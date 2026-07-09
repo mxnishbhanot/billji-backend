@@ -12,7 +12,8 @@ import { logAudit } from '../services/auditService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import { refreshTokenExpiresAt, signAccessToken, signRefreshToken, tokenHash, verifyRefreshToken } from '../utils/jwt.js';
+import { refreshTokenExpiresAt, signAccessToken, signChallengeToken, signRefreshToken, tokenHash, verifyRefreshToken } from '../utils/jwt.js';
+import { createAndSendEmailChallenge, isTrustedDevice, revokeTrustedDevices } from '../services/twoFactorAuth.js';
 
 const businessProfile = (business) => ({
   businessName: business?.businessName || 'QuickInvoice Business',
@@ -64,7 +65,15 @@ const requestUserAgent = (req) => req.get('user-agent') || '';
 // since the user-agent carries no model. Cap length to match the schema.
 const requestDeviceName = (req) => (req.get('x-device-name') || '').trim().slice(0, 120);
 
-const sessionResponse = async ({ req, user, business }) => {
+// Mask an email for a 2FA hint, e.g. "manish@jobtable.com" -> "ma****@jobtable.com".
+const maskEmail = (email = '') => {
+  const [local, domain] = String(email).split('@');
+  if (!domain) return email;
+  const shown = local.slice(0, 2);
+  return `${shown}${'*'.repeat(Math.max(local.length - 2, 2))}@${domain}`;
+};
+
+export const sessionResponse = async ({ req, user, business }) => {
   if (!business) throw new ApiError(403, 'No active business found for this account');
   const membership = await BusinessMember.findOne({ business: business._id, user: user._id, status: 'active' });
   const refreshTokenId = crypto.randomUUID();
@@ -105,6 +114,33 @@ const sessionResponse = async ({ req, user, business }) => {
     sessionId: session._id,
     user: await publicUser(user, business, membership)
   };
+};
+
+// Shared exit for the credential-verifying flows (login, Google). If the user has
+// no 2FA, or is on a device already trusted, issue a full session as before.
+// Otherwise mint a short-lived challenge token (and email a code for the email
+// method) and ask the client to complete /auth/2fa/verify — no session yet.
+const respondWithSessionOr2fa = async ({ req, res, user, business, statusCode = 200 }) => {
+  const method = user.twoFactor?.method || 'none';
+
+  if (method === 'none' || (await isTrustedDevice({ user, req }))) {
+    const session = await sessionResponse({ req, user, business });
+    return res.status(statusCode).json(session);
+  }
+
+  let devCode;
+  if (method === 'email') {
+    devCode = await createAndSendEmailChallenge({ user, purpose: 'login', req });
+  }
+  const challengeToken = signChallengeToken({ userId: user._id, method });
+  return res.status(200).json({
+    success: true,
+    twoFactorRequired: true,
+    method,
+    challengeToken,
+    email: method === 'email' ? maskEmail(user.email) : undefined,
+    devCode: !isProduction ? devCode : undefined
+  });
 };
 
 export const registerRules = [
@@ -235,9 +271,8 @@ export const login = asyncHandler(async (req, res) => {
 
   const business = await Business.findById(user.defaultBusiness);
 
-  const session = await sessionResponse({ req, user, business });
   void logAudit(req, { action: 'auth.login', resourceType: 'user', resourceId: user._id });
-  res.json(session);
+  await respondWithSessionOr2fa({ req, res, user, business });
 });
 
 export const googleSignIn = asyncHandler(async (req, res) => {
@@ -276,9 +311,10 @@ export const googleSignIn = asyncHandler(async (req, res) => {
   }
 
   const business = await Business.findById(user.defaultBusiness);
-  const session = await sessionResponse({ req, user, business });
   void logAudit(req, { action: isNewUser ? 'auth.google_registered' : 'auth.google_login', resourceType: 'user', resourceId: user._id });
-  res.status(isNewUser ? 201 : 200).json(session);
+  // A brand-new Google user has no 2FA yet, so this issues a session directly; an
+  // existing user with 2FA on gets challenged like the password path.
+  await respondWithSessionOr2fa({ req, res, user, business, statusCode: isNewUser ? 201 : 200 });
 });
 
 export const me = asyncHandler(async (req, res) => {
@@ -431,6 +467,7 @@ export const confirmPasswordReset = asyncHandler(async (req, res) => {
   reset.usedAt = new Date();
   await reset.save();
   await Session.updateMany({ user: user._id, revokedAt: null }, { revokedAt: new Date(), revokedReason: 'password_reset' });
+  await revokeTrustedDevices(user._id);
   void logAudit(req, { action: 'auth.password_reset_confirmed', resourceType: 'user', resourceId: user._id });
 
   res.json({ success: true, message: 'Password updated. Please sign in again.' });
