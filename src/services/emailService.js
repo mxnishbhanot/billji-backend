@@ -180,6 +180,89 @@ const buildPasswordResetEmailHtml = ({ name, code, ttlMinutes }) => {
 </html>`;
 };
 
+// Two-factor verification-code email. Same BillJi-branded, email-client-safe
+// layout as the reset email; the purpose line changes with the flow.
+const buildTwoFactorEmailHtml = ({ name, code, ttlMinutes, purpose }) => {
+  const safeName = escapeHtml(name || 'there');
+  const safeCode = escapeHtml(code);
+  const intro =
+    purpose === 'enroll'
+      ? 'Enter the code below to turn on email two-factor authentication for your BillJi account.'
+      : purpose === 'manage'
+        ? 'Enter the code below to confirm this change to your two-factor settings.'
+        : 'Enter the code below to finish signing in to your BillJi account.';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background-color:#f3f4f6;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6;padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
+          <tr>
+            <td style="background-color:#1C1A4A;padding:24px 32px;" align="center">
+              <span style="font-size:26px;font-weight:800;letter-spacing:-1px;">
+                <span style="color:#ffffff;">Bill</span><span style="color:#FF8A1F;">Ji</span>
+              </span>
+              <div style="margin-top:4px;color:#C3C0FF;font-size:12px;font-weight:600;">Hisaab Apka, Growth Apki</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px;">
+              <p style="margin:0 0 8px;color:#111827;font-size:16px;">Hi ${safeName},</p>
+              <p style="margin:0 0 24px;color:#4b5563;font-size:15px;line-height:22px;">${intro}</p>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="center" style="background-color:#f5f4ff;border:1px solid #ddd9ff;border-radius:10px;padding:20px;">
+                    <div style="color:#6b7280;font-size:12px;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">Your verification code</div>
+                    <div style="color:#1C1A4A;font-size:34px;font-weight:800;letter-spacing:10px;">${safeCode}</div>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin:24px 0 0;color:#4b5563;font-size:14px;line-height:21px;">
+                This code expires in <strong>${ttlMinutes} minutes</strong>. If you didn't request it, someone may have your password — sign in and change it right away.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:20px 32px;background-color:#f9fafb;border-top:1px solid #e5e7eb;" align="center">
+              <p style="margin:0;color:#9ca3af;font-size:12px;">
+                Sent by <strong style="color:#111827;">Bill<span style="color:#FF8A1F;">Ji</span></strong> · Please don't reply to this email
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+};
+
+// Sends a 2FA verification code to the account email. Throws ApiError if Resend
+// isn't configured or the send fails so the caller can surface it.
+export const sendTwoFactorCodeEmail = async ({ to, name, code, ttlMinutes, purpose = 'login' }) => {
+  if (!to) throw new ApiError(422, 'Account email is required to send verification code');
+
+  const resend = getResendClient();
+  if (!resend) throw new ApiError(503, 'Email service is not configured');
+
+  const { error } = await resend.emails.send({
+    from: env.resend.from,
+    to,
+    subject: `${code} is your BillJi verification code`,
+    html: buildTwoFactorEmailHtml({ name, code, ttlMinutes, purpose }),
+    text: `Hi ${name || 'there'}, your BillJi verification code is ${code}. It expires in ${ttlMinutes} minutes. If you didn't request it, change your password.`
+  });
+
+  if (error) {
+    throw new ApiError(502, `Failed to send verification email: ${error.message || error.name || 'unknown error'}`);
+  }
+
+  return { recipient: to };
+};
+
 // Sends the reset code to the account email. Throws ApiError if Resend isn't
 // configured or the send fails so the caller can decide how to surface it.
 export const sendPasswordResetEmail = async ({ to, name, code, ttlMinutes }) => {
