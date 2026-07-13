@@ -39,7 +39,8 @@ const businessProfile = (business) => ({
     accentColor: business?.invoiceTemplate?.accentColor || '#4338CA',
     showLogo: business?.invoiceTemplate?.showLogo ?? true,
     showNotes: business?.invoiceTemplate?.showNotes ?? true,
-    showSignature: business?.invoiceTemplate?.showSignature ?? true,
+    showSignature: business?.invoiceTemplate?.showSignature ?? false,
+    signatureUrl: business?.invoiceTemplate?.signatureUrl || '',
     showPaymentRows: business?.invoiceTemplate?.showPaymentRows ?? true
   },
   theme: business?.theme || 'light'
@@ -226,6 +227,7 @@ export const settingsRules = [
   body('invoiceTemplate.showLogo').optional().isBoolean(),
   body('invoiceTemplate.showNotes').optional().isBoolean(),
   body('invoiceTemplate.showSignature').optional().isBoolean(),
+  body('invoiceTemplate.signatureUrl').optional({ nullable: true, checkFalsy: true }).isString(),
   body('invoiceTemplate.showPaymentRows').optional().isBoolean(),
   body('invoiceTemplate.notes').optional({ nullable: true }).isString().isLength({ max: 1000 }).withMessage('Notes must be 1000 characters or fewer')
 ];
@@ -530,6 +532,7 @@ export const updateSettings = asyncHandler(async (req, res) => {
     if (tpl.showLogo !== undefined) req.business.invoiceTemplate.showLogo = Boolean(tpl.showLogo);
     if (tpl.showNotes !== undefined) req.business.invoiceTemplate.showNotes = Boolean(tpl.showNotes);
     if (tpl.showSignature !== undefined) req.business.invoiceTemplate.showSignature = Boolean(tpl.showSignature);
+    if (tpl.signatureUrl !== undefined) req.business.invoiceTemplate.signatureUrl = String(tpl.signatureUrl || '');
     if (tpl.showPaymentRows !== undefined) req.business.invoiceTemplate.showPaymentRows = Boolean(tpl.showPaymentRows);
     if (tpl.notes !== undefined) req.business.invoiceTemplate.notes = String(tpl.notes || '').slice(0, 1000);
   }
