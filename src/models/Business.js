@@ -25,7 +25,8 @@ const businessSchema = new mongoose.Schema(
       accentColor: { type: String, default: '#4338CA', trim: true, maxlength: 9 },
       showLogo: { type: Boolean, default: true },
       showNotes: { type: Boolean, default: true },
-      showSignature: { type: Boolean, default: true },
+      showSignature: { type: Boolean, default: false },
+      signatureUrl: { type: String, default: '' },
       showPaymentRows: { type: Boolean, default: true },
       notes: { type: String, default: '', trim: true, maxlength: 1000 }
     },
