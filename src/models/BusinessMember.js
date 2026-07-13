@@ -11,9 +11,14 @@ const businessMemberSchema = new mongoose.Schema(
       index: true
     },
     role: { type: mongoose.Schema.Types.ObjectId, ref: 'Role', default: null },
-    status: { type: String, enum: ['active', 'invited', 'disabled'], default: 'active', index: true },
+    // Membership lifecycle: invited -> active -> archived (reversible) / removed (terminal).
+    status: { type: String, enum: ['invited', 'active', 'archived', 'removed'], default: 'active', index: true },
     invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-    joinedAt: { type: Date, default: Date.now }
+    joinedAt: { type: Date, default: Date.now },
+    archivedAt: { type: Date, default: null },
+    archivedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    removedAt: { type: Date, default: null },
+    removedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
   },
   { timestamps: true }
 );

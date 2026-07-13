@@ -34,6 +34,8 @@ export const env = {
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
   corsOrigins: parseOrigins(process.env.CORS_ORIGINS || process.env.CLIENT_URL || 'http://localhost:5173'),
   apiPublicUrl: process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 5000}`,
+  // Play Store / download link shown in invite emails (app-only accept flow). Empty = omit.
+  appDownloadUrl: process.env.APP_DOWNLOAD_URL || '',
   smtp: {
     host: process.env.SMTP_HOST || '',
     port: Number(process.env.SMTP_PORT || 587),

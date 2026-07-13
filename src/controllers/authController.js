@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { body, param } from 'express-validator';
+import { EMAIL_NORMALIZE } from '../utils/email.js';
 import Business from '../models/Business.js';
 import BusinessMember from '../models/BusinessMember.js';
 import PasswordResetToken from '../models/PasswordResetToken.js';
@@ -145,12 +146,12 @@ const respondWithSessionOr2fa = async ({ req, res, user, business, statusCode = 
 
 export const registerRules = [
   body('name').trim().notEmpty().withMessage('Name is required').isLength({ max: 80 }),
-  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(EMAIL_NORMALIZE),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
 ];
 
 export const loginRules = [
-  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(EMAIL_NORMALIZE),
   body('password').notEmpty().withMessage('Password is required')
 ];
 
@@ -163,11 +164,11 @@ export const googleRules = [
 ];
 
 export const resetRequestRules = [
-  body('email').isEmail().withMessage('Valid email is required').normalizeEmail()
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(EMAIL_NORMALIZE)
 ];
 
 export const resetConfirmRules = [
-  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(EMAIL_NORMALIZE),
   body('code').trim().matches(/^\d{6}$/).withMessage('Enter the 6-digit code from your email'),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
 ];
@@ -207,7 +208,7 @@ export const settingsRules = [
   body('gstNumber').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 32 }),
   body('phone').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 24 }),
   body('countryCode').optional({ nullable: true, checkFalsy: true }).trim().matches(/^\+\d{1,7}$/).withMessage('Enter a valid country code'),
-  body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
+  body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(EMAIL_NORMALIZE),
   body('website').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 180 }).isURL({ require_protocol: false }),
   body('address').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 500 }),
   body('city').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 80 }),
@@ -319,6 +320,40 @@ export const googleSignIn = asyncHandler(async (req, res) => {
 
 export const me = asyncHandler(async (req, res) => {
   res.json({ success: true, user: await publicUser(req.user, req.business, req.membership) });
+});
+
+// Workspaces this user can act in (their active memberships). Powers the switcher.
+export const listBusinesses = asyncHandler(async (req, res) => {
+  const memberships = await BusinessMember.find({ user: req.user._id, status: 'active' }).populate('business', 'businessName status');
+  const businesses = memberships
+    .filter((m) => m.business && m.business.status === 'active')
+    .map((m) => ({
+      businessId: m.business._id,
+      businessName: m.business.businessName,
+      roleKey: m.roleKey,
+      current: String(m.business._id) === String(req.business._id)
+    }));
+  res.json({ success: true, businesses });
+});
+
+export const switchBusinessRules = [
+  body('businessId').isMongoId().withMessage('Valid business id is required')
+];
+
+// Switch the active workspace. Access tokens carry no business claim (protect resolves
+// req.business from defaultBusiness), so this just re-points defaultBusiness after
+// verifying the caller has an active membership there — no token reissue needed.
+export const switchBusiness = asyncHandler(async (req, res) => {
+  const membership = await BusinessMember.findOne({ business: req.body.businessId, user: req.user._id, status: 'active' });
+  if (!membership) throw new ApiError(403, 'You do not have access to this business');
+  const business = await Business.findOne({ _id: req.body.businessId, status: 'active' });
+  if (!business) throw new ApiError(404, 'Business not found or inactive');
+
+  req.user.defaultBusiness = business._id;
+  await req.user.save();
+  void logAudit(req, { action: 'business.switched', resourceType: 'business', resourceId: business._id });
+
+  res.json({ success: true, user: await publicUser(req.user, business, membership) });
 });
 
 export const refreshSession = asyncHandler(async (req, res) => {

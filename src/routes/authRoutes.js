@@ -3,10 +3,13 @@ import {
   confirmPasswordReset,
   googleRules,
   googleSignIn,
+  listBusinesses,
   login,
   loginRules,
   logout,
   me,
+  switchBusiness,
+  switchBusinessRules,
   register,
   registerRules,
   refreshRules,
@@ -68,6 +71,8 @@ router.post('/2fa/disable', protect, authLimiter, manageRules, validate, twoFact
 router.post('/2fa/backup-codes/regenerate', protect, authLimiter, manageRules, validate, regenerateBackupCodes);
 
 router.get('/me', protect, me);
+router.get('/businesses', protect, listBusinesses);
+router.post('/business/switch', protect, switchBusinessRules, validate, switchBusiness);
 router.patch('/settings', protect, requirePermission(PERMISSIONS.settingsManage), settingsRules, validate, updateSettings);
 
 export default router;

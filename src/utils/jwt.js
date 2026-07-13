@@ -45,5 +45,18 @@ export const verifyChallengeToken = (token) => {
 
 export const signToken = (userId, sessionId) => signAccessToken({ userId, sessionId });
 export const verifyToken = (token) => jwt.verify(token, env.jwtSecret);
+
+// Access-token verify for `protect`. Rejects any same-secret token that is not an
+// access token (notably the 2FA challenge token, which is signed with jwtSecret but
+// carries typ='2fa' and no sid) so it can never authorize a protected API call.
+export const verifyAccessToken = (token) => {
+  const decoded = jwt.verify(token, env.jwtSecret);
+  if (decoded.typ !== 'access') {
+    const err = new Error('Not an access token');
+    err.name = 'JsonWebTokenError';
+    throw err;
+  }
+  return decoded;
+};
 export const verifyRefreshToken = (token) => jwt.verify(token, env.refreshTokenSecret);
 export const refreshTokenExpiresAt = () => new Date(Date.now() + parseDurationMs(env.refreshTokenExpiresIn, 30 * 24 * 60 * 60 * 1000));

@@ -4,7 +4,7 @@ import Session from '../models/Session.js';
 import User from '../models/User.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import { verifyToken } from '../utils/jwt.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 
 export const protect = asyncHandler(async (req, _res, next) => {
   const header = req.headers.authorization || '';
@@ -14,7 +14,7 @@ export const protect = asyncHandler(async (req, _res, next) => {
     throw new ApiError(401, 'Authentication required');
   }
 
-  const decoded = verifyToken(token);
+  const decoded = verifyAccessToken(token);
   const user = await User.findById(decoded.sub).select('-password');
 
   if (!user) {
