@@ -1,28 +1,10 @@
 import Role from '../models/Role.js';
 import { ApiError } from '../utils/ApiError.js';
+import { ALL_PERMISSION_KEYS, PERMISSIONS } from '../constants/permissions.js';
 
-export const PERMISSIONS = {
-  invoicesView: 'invoices.view',
-  invoicesCreate: 'invoices.create',
-  invoicesUpdate: 'invoices.update',
-  invoicesDelete: 'invoices.delete',
-  ordersView: 'orders.view',
-  ordersCreate: 'orders.create',
-  ordersManage: 'orders.manage',
-  paymentsView: 'payments.view',
-  paymentsRecord: 'payments.record',
-  productsView: 'products.view',
-  productsManage: 'products.manage',
-  customersView: 'customers.view',
-  customersManage: 'customers.manage',
-  reportsView: 'reports.view',
-  settingsView: 'settings.view',
-  settingsManage: 'settings.manage',
-  notificationsView: 'notifications.view',
-  notificationsManage: 'notifications.manage'
-};
+export { PERMISSIONS };
 
-const allPermissions = Object.values(PERMISSIONS);
+const allPermissions = ALL_PERMISSION_KEYS;
 
 export const ROLE_PERMISSIONS = {
   owner: allPermissions,

@@ -16,6 +16,11 @@ export const errorHandler = (error, _req, res, _next) => {
     message = 'Invalid resource id';
   }
 
+  if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+    statusCode = 401;
+    message = 'Invalid authentication token';
+  }
+
   if (error.code === 11000) {
     statusCode = 409;
     message = 'Duplicate value already exists';

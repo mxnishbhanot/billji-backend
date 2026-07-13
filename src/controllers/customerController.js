@@ -6,6 +6,7 @@ import { emitBusinessEvent } from '../services/socketService.js';
 import { logAudit } from '../services/auditService.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { EMAIL_NORMALIZE } from '../utils/email.js';
 import { paginateQuery, UNPAGINATED_LIST_CAP, wantsPagination } from '../utils/pagination.js';
 import { buildSearchRegex } from '../utils/searchRegex.js';
 
@@ -13,7 +14,7 @@ export const customerRules = [
   body('name').trim().notEmpty().withMessage('Customer name is required').isLength({ max: 120 }),
   body('phone').trim().notEmpty().withMessage('Phone is required').isLength({ max: 24 }),
   body('countryCode').optional({ nullable: true }).trim().isLength({ max: 8 }),
-  body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
+  body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(EMAIL_NORMALIZE),
   body('address').optional({ nullable: true }).trim().isLength({ max: 500 }),
   body('billingAddress.line1').optional({ nullable: true }).trim().isLength({ max: 200 }),
   body('billingAddress.line2').optional({ nullable: true }).trim().isLength({ max: 200 }),
@@ -35,7 +36,7 @@ export const customerRules = [
   body('contactPersons.*.name').optional({ nullable: true }).trim().isLength({ max: 120 }),
   body('contactPersons.*.role').optional({ nullable: true }).trim().isLength({ max: 80 }),
   body('contactPersons.*.phone').optional({ nullable: true }).trim().isLength({ max: 24 }),
-  body('contactPersons.*.email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
+  body('contactPersons.*.email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(EMAIL_NORMALIZE),
   body('creditBalance').optional().isFloat({ min: 0 }),
   body('outstandingDues').optional().isFloat({ min: 0 }),
   body('isActive').optional().isBoolean().toBoolean()

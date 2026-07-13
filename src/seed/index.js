@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { bootstrapRbac } from '../bootstrap/rbac.js';
 import { connectDB } from '../config/db.js';
 import Business from '../models/Business.js';
 import BusinessMember from '../models/BusinessMember.js';
@@ -10,6 +11,7 @@ import { buildInvoicePayload, setInvoicePdfUrl, stockAdjustmentsForInvoice } fro
 
 const seed = async () => {
   await connectDB();
+  await bootstrapRbac();
 
   // Idempotent seed: clear any prior demo data so re-running does not collide
   // on unique indexes or accumulate duplicates.

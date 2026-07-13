@@ -3,7 +3,7 @@ import { env, isProduction } from '../config/env.js';
 import Business from '../models/Business.js';
 import BusinessMember from '../models/BusinessMember.js';
 import User from '../models/User.js';
-import { verifyToken } from '../utils/jwt.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 
 let io;
 
@@ -40,7 +40,7 @@ export const initSocket = (server) => {
         return next(new Error('Authentication required'));
       }
 
-      const decoded = verifyToken(token);
+      const decoded = verifyAccessToken(token);
       const user = await User.findById(decoded.sub).select('_id defaultBusiness');
 
       if (!user) {
