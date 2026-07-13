@@ -1,5 +1,6 @@
 import http from 'http';
 import app from './app.js';
+import { bootstrapRbac } from './bootstrap/rbac.js';
 import { connectDB } from './config/db.js';
 import { env } from './config/env.js';
 import { startOutboxDispatcher } from './services/eventDispatcher.js';
@@ -9,6 +10,7 @@ import { initSocket } from './services/socketService.js';
 const startServer = async () => {
   try {
     await connectDB();
+    await bootstrapRbac();
     const server = http.createServer(app);
     initSocket(server);
     startOutboxDispatcher();

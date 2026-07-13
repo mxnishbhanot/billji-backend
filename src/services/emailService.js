@@ -286,6 +286,35 @@ export const sendPasswordResetEmail = async ({ to, name, code, ttlMinutes }) => 
   return { recipient: to };
 };
 
+// Sends a team invitation with the raw acceptance token. Mirrors the reset-email
+// path: throws ApiError if Resend isn't configured or the send fails.
+// BillJi is app-only (no web panel), so acceptance happens inside the app via the
+// invite code — not a clickable web link. The email leads with the code and tells
+// the invitee to open the app -> "Have an invite code?" -> paste it. appUrl (Play
+// Store / download link) is included only when configured.
+export const sendTeamInviteEmail = async ({ to, businessName, inviterName, roleName, token, appUrl, ttlDays }) => {
+  if (!to) throw new ApiError(422, 'Invitee email is required to send invitation');
+
+  const resend = getResendClient();
+  if (!resend) throw new ApiError(503, 'Email service is not configured');
+
+  const installHtml = appUrl ? `<p>Don't have the app yet? <a href="${appUrl}">Get BillJi</a>.</p>` : '';
+  const installText = appUrl ? ` Get the app: ${appUrl}.` : '';
+  const { error } = await resend.emails.send({
+    from: env.resend.from,
+    to,
+    subject: `You've been invited to ${businessName || 'a business'} on BillJi`,
+    html: `<p>Hi,</p><p>${inviterName || 'A teammate'} invited you to join <strong>${businessName || 'their business'}</strong> on BillJi as <strong>${roleName || 'a member'}</strong>.</p><p>Open the BillJi app, tap <strong>"Have an invite code?"</strong> and paste this code:</p><p style="font-size:20px;font-weight:bold;letter-spacing:1px">${token}</p>${installHtml}<p>This invitation expires in ${ttlDays} days.</p>`,
+    text: `${inviterName || 'A teammate'} invited you to join ${businessName || 'their business'} on BillJi as ${roleName || 'a member'}. Open the BillJi app, tap "Have an invite code?" and paste this code: ${token}.${installText} Expires in ${ttlDays} days.`
+  });
+
+  if (error) {
+    throw new ApiError(502, `Failed to send invitation email: ${error.message || error.name || 'unknown error'}`);
+  }
+
+  return { recipient: to };
+};
+
 export const sendInvoiceEmail = async ({ invoice, business, to }) => {
   const recipient = to || invoice.customerSnapshot.email;
 

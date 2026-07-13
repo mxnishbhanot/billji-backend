@@ -30,6 +30,12 @@ const businessSchema = new mongoose.Schema(
       notes: { type: String, default: '', trim: true, maxlength: 1000 }
     },
     theme: { type: String, enum: ['light', 'dark'], default: 'light' },
+    // Subscription plan. maxMembers null => derive from the plan key in TeamLimitService;
+    // set it to override for a specific business. Billing/plan-change wiring comes later.
+    plan: {
+      key: { type: String, enum: ['free', 'pro', 'business', 'enterprise'], default: 'free' },
+      maxMembers: { type: Number, default: null }
+    },
     status: { type: String, enum: ['active', 'suspended'], default: 'active', index: true }
   },
   { timestamps: true }

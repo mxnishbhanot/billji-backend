@@ -11,7 +11,9 @@ import paymentRoutes from './paymentRoutes.js';
 import productRoutes from './productRoutes.js';
 import publicRoutes from './publicRoutes.js';
 import reportRoutes from './reportRoutes.js';
+import roleRoutes from './roleRoutes.js';
 import settingsRoutes from './settingsRoutes.js';
+import teamRoutes from './teamRoutes.js';
 
 const router = Router();
 
@@ -27,6 +29,8 @@ router.use('/orders', orderRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/public', publicRoutes);
 router.use('/reports', reportRoutes);
+router.use('/roles', roleRoutes);
 router.use('/settings', settingsRoutes);
+router.use('/team', teamRoutes);
 
 export default router;
