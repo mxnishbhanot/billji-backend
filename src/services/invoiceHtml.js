@@ -52,7 +52,7 @@ const tint = (hex, ratio) => {
 // Shown under NOTES & TERMS when the business hasn't set its own default notes
 // and the invoice itself carries none. Exported so the app can pre-fill the
 // settings field with the same copy.
-export const DEFAULT_INVOICE_NOTES = 'Please make payment by the due date. Quote the invoice number when paying.';
+export const DEFAULT_INVOICE_NOTES = 'Thank you for your business!';
 
 const resolveTemplate = (business = {}) => {
   const tpl = business.invoiceTemplate || {};
@@ -60,7 +60,8 @@ const resolveTemplate = (business = {}) => {
     accentColor: /^#[0-9a-fA-F]{6}$/.test(tpl.accentColor || '') ? tpl.accentColor : '#4338CA',
     showLogo: tpl.showLogo !== false,
     showNotes: tpl.showNotes !== false,
-    showSignature: tpl.showSignature !== false,
+    showSignature: tpl.showSignature === true,
+    signatureUrl: typeof tpl.signatureUrl === 'string' ? tpl.signatureUrl : '',
     showPaymentRows: tpl.showPaymentRows !== false,
     notes: typeof tpl.notes === 'string' ? tpl.notes.trim() : ''
   };
@@ -150,8 +151,11 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   // With the signature block on, leave room for a handwritten signatory line.
   // With it off, state that the invoice is system-generated so the empty space
   // reads as intentional and professional instead of a missing signature.
+  const signImg = tpl.showSignature && isLogoData(tpl.signatureUrl)
+    ? `<img class="sign-img" src="${tpl.signatureUrl}" alt="signature" />`
+    : '<div class="sign-line"></div>';
   const signBlock = tpl.showSignature
-    ? '<div class="sign"><div class="sign-line"></div><div class="sign-text">Authorized signatory</div></div>'
+    ? `<div class="sign">${signImg}<div class="sign-text">Authorized signatory</div></div>`
     : '<div class="sign sign-auto"><div class="sign-note">This is an electronically generated invoice;<br/>no signature is required.</div></div>';
   const footerInner = `
     ${tpl.showNotes ? `<div class="notes"><div class="party-label">NOTES &amp; TERMS</div><div class="notes-text">${escapeHtml(notes)}</div></div>` : '<div class="notes"></div>'}
@@ -230,6 +234,7 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   .notes-text { font-size: 12px; color: #64748b; margin-top: 6px; line-height: 1.5; }
   .sign { width: 170px; text-align: center; }
   .sign-line { border-top: 1px solid #cbd5e1; margin-bottom: 5px; }
+  .sign-img { max-height: 56px; max-width: 100%; object-fit: contain; margin-bottom: 2px; border-bottom: 1px solid #cbd5e1; }
   .sign-text { font-size: 10px; color: #94a3b8; }
   .sign-auto { width: 210px; text-align: right; }
   .sign-note { font-size: 10px; font-style: italic; color: #94a3b8; line-height: 1.5; }
