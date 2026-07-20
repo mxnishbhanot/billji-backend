@@ -30,7 +30,7 @@ export const customerRules = [
   body('shippingAddress.country').optional({ nullable: true }).trim().isLength({ max: 80 }),
   body('gstNumber').optional({ nullable: true }).trim().isLength({ max: 32 }),
   body('taxIdentifiers.gstNumber').optional({ nullable: true }).trim().isLength({ max: 32 }),
-  body('taxIdentifiers.panNumber').optional({ nullable: true }).trim().isLength({ max: 16 }),
+  body('taxIdentifiers.panNumber').optional({ nullable: true, checkFalsy: true }).trim().matches(/^[A-Z]{5}[0-9]{4}[A-Z]$/i).withMessage('Enter a valid PAN'),
   body('taxIdentifiers.taxId').optional({ nullable: true }).trim().isLength({ max: 64 }),
   body('contactPersons').optional({ nullable: true }).isArray({ max: 10 }),
   body('contactPersons.*.name').optional({ nullable: true }).trim().isLength({ max: 120 }),
