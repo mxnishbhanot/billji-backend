@@ -37,7 +37,7 @@ const customerSchema = new mongoose.Schema(
     gstNumber: { type: String, trim: true, uppercase: true, maxlength: 32, default: '' },
     taxIdentifiers: {
       gstNumber: { type: String, trim: true, uppercase: true, maxlength: 32, default: '' },
-      panNumber: { type: String, trim: true, uppercase: true, maxlength: 16, default: '' },
+      panNumber: { type: String, trim: true, uppercase: true, maxlength: 10, default: '' },
       taxId: { type: String, trim: true, maxlength: 64, default: '' }
     },
     contactPersons: { type: [contactPersonSchema], default: [] },
