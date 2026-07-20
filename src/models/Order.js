@@ -28,7 +28,7 @@ const customerSnapshotSchema = new mongoose.Schema(
     gstNumber: { type: String, default: '', trim: true, uppercase: true },
     taxIdentifiers: {
       gstNumber: { type: String, default: '', trim: true, uppercase: true },
-      panNumber: { type: String, default: '', trim: true, uppercase: true },
+      panNumber: { type: String, default: '', trim: true, uppercase: true, maxlength: 10 },
       taxId: { type: String, default: '', trim: true }
     }
   },
