@@ -10,6 +10,7 @@ import {
   createPaymentRecord,
   customerBalanceTotals,
   listPaymentRecords,
+  markInvoiceRefundProcessed,
   paymentIdsAllocatedToInvoice,
   updateCustomerBalance
 } from './repository.js';
@@ -363,6 +364,38 @@ export const recordCustomerPaymentWorkflow = ({ req }) =>
 
     return { payment, allocations, invoices: targets.map((target) => target.invoice), customerBalance };
   });
+
+// "Refunded manually": flip a cancelled invoice's refund-pending receipts to
+// 'processed' and stamp who/when. Flag-only (no money moved) — cancel already
+// unwound the ledger + customer balance. Returns the invoice's updated payments.
+export const markInvoiceRefundProcessedWorkflow = async ({ req }) => {
+  await withTransaction(async (session) => {
+    const invoice = await Invoice.findOne({
+      _id: req.params.invoiceId,
+      business: req.business._id,
+      documentType: 'invoice'
+    }).session(session);
+    if (!invoice) throw new ApiError(404, 'Invoice not found');
+
+    if (invoice.documentStatus !== 'cancelled') {
+      throw new ApiError(409, 'Only a cancelled invoice can have its refund marked processed');
+    }
+
+    const modified = await markInvoiceRefundProcessed(req.business._id, invoice._id, req.user._id, { session });
+    if (modified === 0) {
+      throw new ApiError(409, 'No pending refund to mark for this invoice');
+    }
+
+    // Stamp the invoice so the list card can drop its "Refund pending" flag.
+    invoice.refundResolvedAt = new Date();
+    invoice.updatedBy = req.user._id;
+    await invoice.save({ session });
+  });
+
+  // Read after commit — listPayments runs without the txn session, so it must
+  // see the committed 'processed' values, not the in-flight write.
+  return listPayments({ businessId: req.business._id, invoiceId: req.params.invoiceId });
+};
 
 export const listPayments = async ({ businessId, invoiceId, customerId }) => {
   const filter = { business: businessId };

@@ -37,8 +37,13 @@ const paymentSchema = new mongoose.Schema(
     method: { type: String, enum: PAYMENT_METHODS, default: 'cash', index: true },
     status: { type: String, enum: PAYMENT_STATUSES, default: 'completed', index: true },
     // Refund lifecycle. Set to 'pending' when an invoice with this payment is cancelled
-    // (we never auto-refund); business settles the refund out-of-band and marks 'processed'.
+    // (we never auto-refund); the business settles the refund out-of-band and then marks
+    // it 'processed' via the "Refunded manually" action (payments refund-processed route).
+    // Marking is flag-only: cancel already reversed the ledger + dropped the allocation
+    // from the customer balance, so no refund Payment/ledger entry is created here.
     refundStatus: { type: String, enum: REFUND_STATUSES, default: 'none', index: true },
+    refundedAt: { type: Date, default: null },
+    refundedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     amount: { type: Number, required: true, min: 0 },
     allocatedAmount: { type: Number, default: 0, min: 0 },
     unappliedAmount: { type: Number, default: 0, min: 0 },

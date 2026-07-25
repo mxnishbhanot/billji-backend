@@ -37,6 +37,19 @@ export const markInvoicePaymentsRefundPending = (businessId, invoiceId, { sessio
     { session }
   );
 
+// Move this invoice's refund-pending receipts to 'processed' (the "Refunded
+// manually" action). Flag-only: cancel already reversed the ledger and dropped
+// the allocation from the customer balance, so no money is moved here. Returns
+// the number of payments flipped.
+export const markInvoiceRefundProcessed = async (businessId, invoiceId, actorId, { session } = {}) => {
+  const result = await Payment.updateMany(
+    { business: businessId, invoice: invoiceId, refundStatus: 'pending' },
+    { $set: { refundStatus: 'processed', refundedAt: new Date(), refundedBy: actorId, updatedBy: actorId } },
+    { session }
+  );
+  return result.modifiedCount ?? result.nModified ?? 0;
+};
+
 // Any money touched this invoice — direct payment OR an allocation from a
 // multi-invoice payment whose own `invoice` field points elsewhere.
 export const invoiceHasPayments = async (businessId, invoiceId, { session } = {}) => {
