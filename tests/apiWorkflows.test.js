@@ -128,6 +128,70 @@ describe('invoice API quality coverage', () => {
     assert.equal(await Invoice.countDocuments({ business: business._id }), 1);
   });
 
+  it('marks a cancelled invoice refund as processed (flag-only) and rejects a second mark', async () => {
+    const { business, token } = await createTestContext();
+    const customer = await createCustomer(business);
+    const product = await createProduct(business, { stockQuantity: 5, price: 120 });
+    const invoiceResponse = await createInvoice({ token, customer, product, quantity: 2, key: 'refund-mark-invoice' }).expect(201);
+    const invoiceId = invoiceResponse.body.invoice._id;
+
+    await api()
+      .post(`/api/v1/payments/invoices/${invoiceId}/record`)
+      .set(authHeader(token))
+      .set(IDEMPOTENCY_HEADER, 'refund-mark-payment')
+      .send({ amount: 100, method: 'cash' })
+      .expect(201);
+
+    await api()
+      .patch(`/api/v1/invoices/${invoiceId}/status`)
+      .set(authHeader(token))
+      .send({ status: 'cancelled' })
+      .expect(200);
+
+    const reversalsAfterCancel = await LedgerEntry.countDocuments({ business: business._id, invoice: invoiceId, sourceType: 'adjustment' });
+    const balanceBefore = await CustomerBalance.findOne({ business: business._id, customer: customer._id }).lean();
+
+    const marked = await api()
+      .post(`/api/v1/payments/invoices/${invoiceId}/refund-processed`)
+      .set(authHeader(token))
+      .set(IDEMPOTENCY_HEADER, 'refund-mark-1')
+      .expect(200);
+    assert.equal(marked.body.payments[0].refundStatus, 'processed');
+    assert.ok(marked.body.payments[0].refundedAt);
+    assert.ok(marked.body.payments[0].refundedBy);
+
+    // Invoice stamped so the list card can drop its "Refund pending" flag.
+    assert.ok((await Invoice.findById(invoiceId).lean()).refundResolvedAt);
+
+    // Flag-only: no new payment, no extra ledger entry, balance unchanged.
+    assert.equal(await Payment.countDocuments({ business: business._id, invoice: invoiceId }), 1);
+    assert.equal(await LedgerEntry.countDocuments({ business: business._id, invoice: invoiceId, sourceType: 'adjustment' }), reversalsAfterCancel);
+    const balanceAfter = await CustomerBalance.findOne({ business: business._id, customer: customer._id }).lean();
+    assert.equal(balanceAfter.outstandingDues, balanceBefore.outstandingDues);
+    assert.equal(balanceAfter.creditBalance, balanceBefore.creditBalance);
+
+    // Nothing left pending → second mark is a 409.
+    await api()
+      .post(`/api/v1/payments/invoices/${invoiceId}/refund-processed`)
+      .set(authHeader(token))
+      .set(IDEMPOTENCY_HEADER, 'refund-mark-2')
+      .expect(409);
+  });
+
+  it('rejects marking a refund processed on a non-cancelled invoice', async () => {
+    const { business, token } = await createTestContext();
+    const customer = await createCustomer(business);
+    const product = await createProduct(business, { stockQuantity: 5, price: 120 });
+    const invoiceResponse = await createInvoice({ token, customer, product, quantity: 1, key: 'refund-mark-active' }).expect(201);
+    const invoiceId = invoiceResponse.body.invoice._id;
+
+    await api()
+      .post(`/api/v1/payments/invoices/${invoiceId}/refund-processed`)
+      .set(authHeader(token))
+      .set(IDEMPOTENCY_HEADER, 'refund-mark-active-1')
+      .expect(409);
+  });
+
   it('permanently deletes an unprocessed invoice (no payments, stock, or ledger)', async () => {
     const { business, token } = await createTestContext();
     const customer = await createCustomer(business);
