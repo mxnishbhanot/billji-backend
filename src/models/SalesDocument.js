@@ -114,7 +114,11 @@ export const salesDocumentSchema = new mongoose.Schema(
     // Audit trail for cancellation (cancel preserves the document; never physically deleted).
     cancelledAt: { type: Date, default: null },
     cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-    cancelReason: { type: String, default: '', trim: true, maxlength: 500 }
+    cancelReason: { type: String, default: '', trim: true, maxlength: 500 },
+    // Set when a cancelled invoice's refund-pending receipts are marked refunded
+    // manually — lets the list card drop the "Refund pending" flag without a
+    // per-invoice payment lookup. Flag-only; no money moves.
+    refundResolvedAt: { type: Date, default: null }
   },
   { timestamps: true }
 );

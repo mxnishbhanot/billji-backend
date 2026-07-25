@@ -5,6 +5,7 @@ import { asyncHandler } from '../../utils/asyncHandler.js';
 import {
   getCustomerOutstanding,
   listPayments,
+  markInvoiceRefundProcessedWorkflow,
   recordCustomerPaymentWorkflow,
   recordInvoicePaymentWorkflow,
   serializeCustomerPaymentResult,
@@ -39,6 +40,17 @@ export const recordInvoicePayment = asyncHandler(async (req, res) => {
       invoice: serializeInvoice(result.invoice, req)
     })
   });
+});
+
+export const markInvoiceRefundProcessed = asyncHandler(async (req, res) => {
+  const payments = await markInvoiceRefundProcessedWorkflow({ req });
+  void logAudit(req, {
+    action: 'payment.refund_processed',
+    resourceType: 'invoice',
+    resourceId: req.params.invoiceId
+  });
+
+  res.json({ success: true, payments });
 });
 
 export const listCustomerOutstanding = asyncHandler(async (req, res) => {

@@ -4,6 +4,7 @@ import { DOMAIN_EVENTS } from './eventBus.js';
 import { projectNotificationsForEvent } from './notificationService.js';
 import { invalidateReportSummaryCache } from './reportService.js';
 import { recomputeOrderCacheForEvent } from '../modules/orders/paymentCache.js';
+import { runDataExport } from '../modules/exports/service.js';
 
 const MAX_ATTEMPTS = 5;
 
@@ -34,6 +35,16 @@ const ORDER_RECOMPUTE_EVENTS = new Set([
 ]);
 
 export const dispatchOutboxEvent = async (event) => {
+  // The outbox is also the job queue: claim-and-retry with backoff is exactly what a
+  // long-running export needs, and it already exists.
+  // ponytail: this loop is sequential, so an export delays notification projection for
+  // its duration. Fine for a seconds-long CSV/JSON build; give exports their own worker
+  // if they grow to tens of seconds.
+  if (event.eventType === DOMAIN_EVENTS.dataExportRequested) {
+    await runDataExport(event.aggregateId);
+    return;
+  }
+
   await projectNotificationsForEvent(event);
 
   if (REPORT_INVALIDATING_EVENTS.has(event.eventType)) {

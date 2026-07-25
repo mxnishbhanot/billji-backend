@@ -97,6 +97,25 @@ export const getPublicObjectUrl = (key) => {
   return `${env.r2.publicBaseUrl.replace(/\/+$/, '')}/${key}`;
 };
 
+// Always-presigned, always-expiring URL, with an optional download filename.
+//
+// Use this instead of getObjectUrl for anything sensitive: getObjectUrl returns a
+// PERMANENT public URL whenever R2_PUBLIC_BASE_URL is set, which is right for invoice
+// PDFs in emails and wrong for a full data export.
+export const getSignedObjectUrl = async (key, { expiresIn = env.r2.signedUrlTtlSeconds, fileName = '' } = {}) => {
+  if (!enabled || !key) return null;
+  const client = await getClient();
+  return getSignedUrl(
+    client,
+    new GetObjectCommand({
+      Bucket: env.r2.bucket,
+      Key: key,
+      ...(fileName ? { ResponseContentDisposition: `attachment; filename="${fileName}"` } : {})
+    }),
+    { expiresIn }
+  );
+};
+
 // Public URL for a cached object. Prefers a configured public domain (zero-egress
 // via Cloudflare), otherwise falls back to a short-lived presigned URL.
 export const getObjectUrl = async (key) => {

@@ -58,7 +58,8 @@ export const PERMISSION_GROUPS = [
     label: 'Settings',
     permissions: [
       { name: 'settingsView', key: 'settings.view', label: 'View settings' },
-      { name: 'settingsManage', key: 'settings.manage', label: 'Manage settings' }
+      { name: 'settingsManage', key: 'settings.manage', label: 'Manage settings' },
+      { name: 'settingsExport', key: 'settings.export', label: 'Export business data' }
     ]
   },
   {
