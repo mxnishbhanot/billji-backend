@@ -7,7 +7,8 @@ export const DOMAIN_EVENTS = {
   paymentRecorded: 'payment.recorded',
   stockAdjusted: 'stock.adjusted',
   draftSaved: 'draft.saved',
-  customerCreated: 'customer.created'
+  customerCreated: 'customer.created',
+  dataExportRequested: 'data_export.requested'
 };
 
 const objectId = (value) => value?._id || value || null;

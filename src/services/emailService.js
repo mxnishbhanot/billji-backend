@@ -315,6 +315,41 @@ export const sendTeamInviteEmail = async ({ to, businessName, inviterName, roleN
   return { recipient: to };
 };
 
+// Sends the data-export download link. The link carries a single-purpose token and
+// expires, so it goes in the body rather than attaching the archive (exports routinely
+// exceed provider attachment limits).
+//
+// Callers treat a throw here as non-fatal: the export itself already succeeded and is
+// downloadable in the app, so a missing RESEND_API_KEY must not fail the job.
+export const sendDataExportReadyEmail = async ({ to, name, business, downloadUrl, sizeBytes, expiresAt }) => {
+  if (!to) throw new ApiError(422, 'Account email is required to send the export link');
+
+  const resend = getResendClient();
+  if (!resend) throw new ApiError(503, 'Email service is not configured');
+
+  const brand = escapeHtml(business?.businessName || 'your business');
+  const sizeMb = (Number(sizeBytes || 0) / (1024 * 1024)).toFixed(1);
+  const expiresOn = formatDate(expiresAt);
+
+  const { error } = await resend.emails.send({
+    from: resolveFrom(business),
+    to,
+    subject: `Your ${business?.businessName || 'BillJi'} data export is ready`,
+    html: `<p>Hi ${escapeHtml(name || 'there')},</p>
+<p>The data export you requested for <strong>${brand}</strong> is ready. It contains your customers, products, invoices, orders, payments and ledger as spreadsheets (CSV) and raw JSON.</p>
+<p><a href="${downloadUrl}" style="display:inline-block;padding:12px 20px;background:#4338CA;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold;">Download export (${sizeMb} MB)</a></p>
+<p>This link works until <strong>${expiresOn}</strong>, then the archive is deleted. You can request a fresh export from Settings at any time.</p>
+<p>Anyone with this link can download your full business record, so don't forward it.</p>`,
+    text: `Hi ${name || 'there'}, your ${business?.businessName || 'BillJi'} data export is ready (${sizeMb} MB). Download it here: ${downloadUrl} . The link works until ${expiresOn}, then the archive is deleted. Anyone with this link can download your full business record, so don't forward it.`
+  });
+
+  if (error) {
+    throw new ApiError(502, `Failed to send export email: ${error.message || error.name || 'unknown error'}`);
+  }
+
+  return { recipient: to };
+};
+
 export const sendInvoiceEmail = async ({ invoice, business, to }) => {
   const recipient = to || invoice.customerSnapshot.email;
 
