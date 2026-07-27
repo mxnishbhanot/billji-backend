@@ -18,7 +18,6 @@ router.patch(
   '/progress',
   [
     body('orientation').optional().isObject(),
-    body('checklist').optional().isObject(),
     body('tips').optional().isObject()
   ],
   validate,
@@ -29,8 +28,6 @@ router.post(
   '/replay',
   [
     body('orientation').optional().isBoolean(),
-    body('checklist').optional().isBoolean(),
-    body('resetChecklist').optional().isBoolean(),
     body('tipIds').optional().isArray(),
     body('tipIds.*').optional().isString().isLength({ max: 80 })
   ],

@@ -1,14 +1,5 @@
 import mongoose from 'mongoose';
 
-const itemStatusSchema = new mongoose.Schema(
-  {
-    status: { type: String, enum: ['pending', 'completed', 'skipped'], default: 'pending' },
-    completedAt: { type: Date, default: null },
-    method: { type: String, enum: ['action', 'detected', 'skipped', null], default: null }
-  },
-  { _id: false }
-);
-
 const tipStatusSchema = new mongoose.Schema(
   {
     status: { type: String, enum: ['pending', 'seen', 'completed', 'dismissed', 'snoozed'], default: 'pending' },
@@ -31,12 +22,6 @@ const onboardingProgressSchema = new mongoose.Schema(
       currentStep: { type: String, default: '', trim: true, maxlength: 80 },
       completedAt: { type: Date, default: null },
       dismissedAt: { type: Date, default: null }
-    },
-    checklist: {
-      status: { type: String, enum: ['active', 'completed', 'dismissed'], default: 'active' },
-      dismissedAt: { type: Date, default: null },
-      completedAt: { type: Date, default: null },
-      items: { type: Map, of: itemStatusSchema, default: () => new Map() }
     },
     tips: { type: Map, of: tipStatusSchema, default: () => new Map() }
   },
