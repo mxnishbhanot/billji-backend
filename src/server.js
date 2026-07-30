@@ -1,10 +1,12 @@
 import http from 'http';
 import app from './app.js';
+import { registerScheduledJobs } from './bootstrap/jobs.js';
 import { bootstrapRbac } from './bootstrap/rbac.js';
 import { connectDB } from './config/db.js';
 import { env } from './config/env.js';
 import { startOutboxDispatcher } from './services/eventDispatcher.js';
 import { closePdfBrowser } from './services/pdfService.js';
+import { startScheduler } from './services/scheduler.js';
 import { initSocket } from './services/socketService.js';
 
 const startServer = async () => {
@@ -14,6 +16,8 @@ const startServer = async () => {
     const server = http.createServer(app);
     initSocket(server);
     startOutboxDispatcher();
+    registerScheduledJobs();
+    startScheduler();
 
     server.listen(env.port, () => {
       console.log(`QuickInvoice API running on port ${env.port}`);
