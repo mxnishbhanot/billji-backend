@@ -2,7 +2,9 @@ import mongoose from 'mongoose';
 
 export const PAYMENT_METHODS = ['cash', 'upi', 'bank_transfer', 'card', 'cheque', 'wallet', 'other'];
 export const PAYMENT_STATUSES = ['pending', 'completed', 'failed', 'refunded'];
-export const PAYMENT_TYPES = ['receipt', 'refund'];
+// 'vendor_payment' is money going the other way: same shape, so it shares this model
+// rather than a parallel one, and every cash movement stays in one place.
+export const PAYMENT_TYPES = ['receipt', 'refund', 'vendor_payment'];
 export const REFUND_STATUSES = ['none', 'pending', 'processed'];
 
 const paymentStatusHistorySchema = new mongoose.Schema(
@@ -29,6 +31,8 @@ const paymentSchema = new mongoose.Schema(
   {
     business: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true, index: true },
     customer: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null, index: true },
+    vendor: { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor', default: null, index: true },
+    purchaseBill: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseBill', default: null, index: true },
     salesDocument: { type: mongoose.Schema.Types.ObjectId, ref: 'SalesDocument', default: null, index: true },
     invoice: { type: mongoose.Schema.Types.ObjectId, ref: 'Invoice', default: null, index: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
@@ -59,6 +63,7 @@ const paymentSchema = new mongoose.Schema(
 );
 
 paymentSchema.index({ business: 1, customer: 1, receivedAt: -1 });
+paymentSchema.index({ business: 1, vendor: 1, receivedAt: -1 });
 paymentSchema.index({ business: 1, invoice: 1, receivedAt: -1 });
 paymentSchema.index({ business: 1, status: 1, receivedAt: -1 });
 paymentSchema.index({ business: 1, receivedAt: -1 });
