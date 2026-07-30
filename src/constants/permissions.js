@@ -49,6 +49,16 @@ export const PERMISSION_GROUPS = [
     ]
   },
   {
+    domain: 'expenses',
+    label: 'Expenses & purchases',
+    permissions: [
+      { name: 'expensesView', key: 'expenses.view', label: 'View expenses' },
+      { name: 'expensesManage', key: 'expenses.manage', label: 'Record & edit expenses' },
+      { name: 'purchasesView', key: 'purchases.view', label: 'View purchases & vendors' },
+      { name: 'purchasesManage', key: 'purchases.manage', label: 'Record purchases & pay vendors' }
+    ]
+  },
+  {
     domain: 'reports',
     label: 'Reports',
     permissions: [{ name: 'reportsView', key: 'reports.view', label: 'View reports & ledger' }]

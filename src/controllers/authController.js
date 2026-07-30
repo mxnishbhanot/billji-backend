@@ -43,6 +43,7 @@ const businessProfile = (business) => ({
     signatureUrl: business?.invoiceTemplate?.signatureUrl || '',
     showPaymentRows: business?.invoiceTemplate?.showPaymentRows ?? true
   },
+  reminderTemplate: business?.reminderTemplate || '',
   theme: business?.theme || 'light'
 });
 
@@ -217,6 +218,7 @@ export const settingsRules = [
   body('state').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 80 }),
   body('panNumber').optional({ nullable: true, checkFalsy: true }).trim().matches(/^[A-Z]{5}[0-9]{4}[A-Z]$/i).withMessage('Enter a valid PAN'),
   body('invoicePrefix').optional().trim().isLength({ min: 1, max: 12 }),
+  body('reminderTemplate').optional({ nullable: true }).isString().isLength({ max: 1000 }).withMessage('Reminder message must be 1000 characters or fewer'),
   body('theme').optional().isIn(['light', 'dark']),
   body('taxSettings').optional().isObject().withMessage('taxSettings must be an object'),
   body('taxSettings.defaultRate').optional().isFloat({ min: 0, max: 100 }).withMessage('Default tax rate must be between 0 and 100'),
@@ -511,7 +513,7 @@ export const confirmPasswordReset = asyncHandler(async (req, res) => {
 });
 
 export const updateSettings = asyncHandler(async (req, res) => {
-  const allowed = ['businessName', 'logoUrl', 'gstNumber', 'phone', 'countryCode', 'email', 'website', 'address', 'city', 'pinCode', 'state', 'invoicePrefix', 'panNumber', 'theme'];
+  const allowed = ['businessName', 'logoUrl', 'gstNumber', 'phone', 'countryCode', 'email', 'website', 'address', 'city', 'pinCode', 'state', 'invoicePrefix', 'panNumber', 'reminderTemplate', 'theme'];
 
   allowed.forEach((field) => {
     if (Object.prototype.hasOwnProperty.call(req.body, field)) {

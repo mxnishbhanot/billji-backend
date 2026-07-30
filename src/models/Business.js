@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { stateCodeFromGstin, stateCodeFromName } from '../constants/gstStates.js';
 
 const businessSchema = new mongoose.Schema(
   {
@@ -14,7 +15,17 @@ const businessSchema = new mongoose.Schema(
     city: { type: String, default: '', trim: true, maxlength: 80 },
     pinCode: { type: String, default: '', trim: true, maxlength: 12 },
     state: { type: String, default: '', trim: true, maxlength: 80 },
+    // GST state code of the place of business — the supplier side of every
+    // CGST/SGST vs IGST decision. Derived from the GSTIN when one is set (see
+    // syncStateCode below), editable directly when the business is unregistered.
+    stateCode: { type: String, default: '', trim: true, maxlength: 2 },
     invoicePrefix: { type: String, default: 'INV', trim: true, uppercase: true, maxlength: 12 },
+    // Per-document-type number prefixes. Each type keeps its own sequence, as GST
+    // requires document series to be separate and continuous.
+    quotationPrefix: { type: String, default: 'QTN', trim: true, uppercase: true, maxlength: 12 },
+    challanPrefix: { type: String, default: 'DC', trim: true, uppercase: true, maxlength: 12 },
+    creditNotePrefix: { type: String, default: 'CN', trim: true, uppercase: true, maxlength: 12 },
+    purchasePrefix: { type: String, default: 'PUR', trim: true, uppercase: true, maxlength: 12 },
     panNumber: { type: String, default: '', trim: true, uppercase: true, maxlength: 10 },
     taxSettings: {
       defaultRate: { type: Number, default: 0, min: 0, max: 100 },
@@ -30,6 +41,9 @@ const businessSchema = new mongoose.Schema(
       showPaymentRows: { type: Boolean, default: true },
       notes: { type: String, default: '', trim: true, maxlength: 1000 }
     },
+    // WhatsApp payment-reminder text. Empty = use the built-in copy. Tokens:
+    // {name} {invoice} {amount} {link} {business} {days}.
+    reminderTemplate: { type: String, default: '', trim: true, maxlength: 1000 },
     theme: { type: String, enum: ['light', 'dark'], default: 'light' },
     // Subscription plan. maxMembers null => derive from the plan key in TeamLimitService;
     // set it to override for a specific business. Billing/plan-change wiring comes later.
@@ -41,6 +55,20 @@ const businessSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// A GSTIN carries its state in the first two digits and is authoritative — a business
+// cannot be registered in one state and file from another. Only fall back to the
+// free-text state field when there is no usable GSTIN.
+businessSchema.pre('validate', function syncStateCode(next) {
+  const fromGstin = stateCodeFromGstin(this.gstNumber);
+  if (fromGstin) {
+    this.stateCode = fromGstin;
+  } else if (!this.stateCode) {
+    this.stateCode = stateCodeFromName(this.state);
+  }
+
+  next();
+});
 
 businessSchema.index({ owner: 1, businessName: 1 });
 

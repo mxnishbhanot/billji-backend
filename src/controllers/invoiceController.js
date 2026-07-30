@@ -11,8 +11,10 @@ import {
   buildWhatsAppLink,
   getInvoiceForBusiness,
   normalizeItems,
+  resolveDocumentSupply,
   serializeInvoice
 } from '../services/invoiceService.js';
+import { DEFAULT_REMINDER_TEMPLATE, listPendingReminders, sendReminders } from '../services/reminderService.js';
 import { sendInvoiceEmail } from '../services/emailService.js';
 import { buildInvoiceHtml } from '../services/invoiceHtml.js';
 import { generateInvoicePdf } from '../services/pdfService.js';
@@ -44,6 +46,9 @@ export const invoiceRules = [
   body('items.*.name').optional().trim().isLength({ max: 120 }),
   body('items.*.quantity').isInt({ min: 1 }),
   body('items.*.price').optional().isFloat({ min: 0 }),
+  body('items.*.hsn').optional({ nullable: true }).trim().isLength({ max: 8 }).withMessage('HSN/SAC must be 8 characters or fewer'),
+  body('items.*.taxRate').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+  body('placeOfSupplyCode').optional({ nullable: true, checkFalsy: true }).isLength({ min: 2, max: 2 }).withMessage('Place of supply must be a 2-digit state code'),
   body('taxRate').optional().isFloat({ min: 0, max: 100 }),
   body('discountType').optional().isIn(['flat', 'percentage']),
   body('discountValue').optional().isFloat({ min: 0 }),
@@ -131,11 +136,14 @@ export const createInvoice = asyncHandler(async (req, res) => {
 export const previewInvoice = asyncHandler(async (req, res) => {
   const { snapshot } = await buildCustomerSnapshot(req.business._id, req.body);
   const items = await normalizeItems(req.business._id, req.body.items || [], { allowOversell: true });
+  const { placeOfSupply, supplyType } = resolveDocumentSupply(req.business, snapshot, req.body);
   const totals = calculateInvoiceTotals({
     items,
     taxRate: req.body.taxRate,
     discountType: req.body.discountType,
-    discountValue: req.body.discountValue
+    discountValue: req.body.discountValue,
+    supplyType,
+    pricesIncludeTax: Boolean(req.business?.taxSettings?.pricesIncludeTax)
   });
 
   const previewInvoiceData = {
@@ -149,6 +157,9 @@ export const previewInvoice = asyncHandler(async (req, res) => {
     subtotal: totals.subtotal,
     tax: totals.tax,
     discount: totals.discount,
+    placeOfSupply,
+    supplyType,
+    taxSummary: totals.taxSummary,
     total: totals.total,
     paidAmount: 0,
     balanceDue: totals.total,
@@ -279,6 +290,33 @@ export const emailInvoice = asyncHandler(async (req, res) => {
   });
 
   res.json({ success: true, message: `Invoice sent to ${result.recipient}` });
+});
+
+export const reminderRules = [
+  body('invoiceIds').isArray({ min: 1 }).withMessage('Select at least one invoice'),
+  body('invoiceIds.*').isMongoId().withMessage('Invalid invoice id')
+];
+
+export const pendingReminders = asyncHandler(async (req, res) => {
+  const result = await listPendingReminders(req.business._id);
+  res.json({
+    success: true,
+    ...result,
+    template: req.business.reminderTemplate || DEFAULT_REMINDER_TEMPLATE
+  });
+});
+
+export const prepareReminders = asyncHandler(async (req, res) => {
+  const { reminders, requested, prepared } = await sendReminders({ req, invoiceIds: req.body.invoiceIds });
+
+  void logAudit(req, {
+    action: 'invoice.reminders_sent',
+    resourceType: 'invoice',
+    metadata: { requested, prepared, channel: 'whatsapp' }
+  });
+  emitBusinessEvent(req.business._id, 'notifications:changed', { reason: 'payment_reminders' });
+
+  res.json({ success: true, reminders, requested, prepared });
 });
 
 export const rotateInvoiceShareLink = asyncHandler(async (req, res) => {

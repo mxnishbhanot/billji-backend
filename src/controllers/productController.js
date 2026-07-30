@@ -20,7 +20,9 @@ export const productRules = [
   body('sku').optional({ nullable: true }).trim().isLength({ max: 64 }),
   body('category').optional({ nullable: true }).trim().isLength({ max: 80 }),
   body('unit').optional({ nullable: true }).trim().isLength({ max: 24 }),
-  body('taxRate').optional().isFloat({ min: 0, max: 100 }),
+  body('hsn').optional({ nullable: true }).trim().isLength({ max: 8 }).withMessage('HSN/SAC must be 8 characters or fewer'),
+  body('barcode').optional({ nullable: true }).trim().isLength({ max: 64 }).withMessage('Barcode must be 64 characters or fewer'),
+  body('taxRate').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
   body('trackStock').optional().isBoolean().toBoolean(),
   body('lowStockThreshold').optional().isInt({ min: 0 }),
   body('isActive').optional().isBoolean().toBoolean()
@@ -65,6 +67,8 @@ const productPayload = (body, { defaults = false } = {}) => {
 
   if (defaults || hasOwn(body, 'purchasePrice')) payload.purchasePrice = body.purchasePrice ?? 0;
   if (defaults || hasOwn(body, 'unit')) payload.unit = body.unit || 'pcs';
+  if (defaults || hasOwn(body, 'hsn')) payload.hsn = body.hsn || '';
+  if (defaults || hasOwn(body, 'barcode')) payload.barcode = body.barcode || '';
   if (defaults || hasOwn(body, 'taxRate')) payload.taxRate = body.taxRate ?? 0;
   if (defaults || hasOwn(body, 'trackStock')) payload.trackStock = body.trackStock ?? true;
   if (defaults || hasOwn(body, 'isActive')) payload.isActive = body.isActive ?? true;
@@ -76,13 +80,24 @@ export const listProducts = asyncHandler(async (req, res) => {
   const { search = '', category = '', stockStatus = 'all', status = 'all', minPrice = '', maxPrice = '', sort = 'updated', from = '', to = '' } = req.query;
   const filter = { business: req.business._id };
 
-  const searchRegex = buildSearchRegex(search);
-  if (searchRegex) {
-    filter.$or = [
-      { name: searchRegex },
-      { sku: searchRegex },
-      { category: searchRegex }
-    ];
+  // A scanned code is an exact identifier, not a search term: when the query matches a
+  // barcode exactly, return that product alone. Otherwise a scan of "5901234123457" could
+  // come back behind a product whose name happens to contain those digits.
+  const scanned = String(search || '').trim();
+  const barcodeMatch = scanned ? await Product.findOne({ business: req.business._id, barcode: scanned }).select('_id').lean() : null;
+
+  if (barcodeMatch) {
+    filter._id = barcodeMatch._id;
+  } else {
+    const searchRegex = buildSearchRegex(search);
+    if (searchRegex) {
+      filter.$or = [
+        { name: searchRegex },
+        { sku: searchRegex },
+        { barcode: searchRegex },
+        { category: searchRegex }
+      ];
+    }
   }
 
   if (category) {
@@ -423,6 +438,9 @@ export const listProductStockMovements = asyncHandler(async (req, res) => {
         sku: product.sku,
         category: product.category,
         unit: product.unit,
+        hsn: product.hsn,
+        barcode: product.barcode,
+      barcode: product.barcode,
         taxRate: product.taxRate,
         purchasePrice: product.purchasePrice,
         trackStock: product.trackStock,
@@ -446,6 +464,8 @@ export const listProductStockMovements = asyncHandler(async (req, res) => {
       sku: product.sku,
       category: product.category,
       unit: product.unit,
+      hsn: product.hsn,
+      barcode: product.barcode,
       taxRate: product.taxRate,
       purchasePrice: product.purchasePrice,
       trackStock: product.trackStock,

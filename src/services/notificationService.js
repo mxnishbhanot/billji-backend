@@ -2,6 +2,7 @@ import Notification from '../models/Notification.js';
 import Invoice from '../models/Invoice.js';
 import Product from '../models/Product.js';
 import { DOMAIN_EVENTS } from './eventBus.js';
+import { sendPushForNotification } from './pushService.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -56,8 +57,8 @@ export const upsertNotification = async ({
   sortDate = new Date(),
   sourceEvent = null,
   metadata = {}
-}) =>
-  Notification.findOneAndUpdate(
+}) => {
+  const result = await Notification.findOneAndUpdate(
     { business, notificationId },
     {
       $set: {
@@ -77,8 +78,23 @@ export const upsertNotification = async ({
       },
       $setOnInsert: { business, notificationId }
     },
-    { new: true, upsert: true, setDefaultsOnInsert: true }
+    { new: true, upsert: true, setDefaultsOnInsert: true, includeResultMetadata: true }
   );
+
+  const notification = result?.value || null;
+
+  // Push on first creation only. Every notification in the app funnels through this
+  // upsert, including the hourly reminder sweep which re-writes the same rows every
+  // hour — pushing on update too would buzz the owner about one overdue invoice every
+  // hour forever. Cost: a notification that was resolved and later recurs (invoice paid,
+  // then part-refunded back to unpaid) reuses its row and stays silent. Quiet is the
+  // safer failure here.
+  if (notification && !result?.lastErrorObject?.updatedExisting) {
+    void sendPushForNotification(notification, { excludeUserId: actor });
+  }
+
+  return notification;
+};
 
 const resolveNotifications = (business, filters) =>
   Notification.updateMany({ business, resolvedAt: null, ...filters }, { $set: { resolvedAt: new Date() } });

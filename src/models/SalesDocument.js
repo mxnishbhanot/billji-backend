@@ -42,12 +42,21 @@ const salesDocumentItemSchema = new mongoose.Schema(
     product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
     name: { type: String, required: true, trim: true },
     sku: { type: String, default: '', trim: true },
+    // HSN (goods) / SAC (services) classification code — mandatory on B2B GST invoices.
+    hsn: { type: String, default: '', trim: true, maxlength: 8 },
     unit: { type: String, default: 'pcs', trim: true },
     quantity: { type: Number, required: true, min: 1 },
     price: { type: Number, required: true, min: 0 },
     purchasePrice: { type: Number, default: 0, min: 0 },
     taxRate: { type: Number, default: 0, min: 0 },
+    // Line value the tax was charged on: gross minus this line's share of any
+    // document-level discount (and net of tax when prices are tax-inclusive).
+    taxableValue: { type: Number, default: 0, min: 0 },
     taxAmount: { type: Number, default: 0, min: 0 },
+    // Exactly one of (cgst+sgst) or igst is non-zero, decided by place of supply.
+    cgst: { type: Number, default: 0, min: 0 },
+    sgst: { type: Number, default: 0, min: 0 },
+    igst: { type: Number, default: 0, min: 0 },
     total: { type: Number, required: true, min: 0 },
     isCustom: { type: Boolean, default: false }
   },
@@ -80,6 +89,14 @@ export const salesDocumentSchema = new mongoose.Schema(
     customer: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null, index: true },
     // OR-0: nullable link to source Order. Null = direct invoice (legacy flow). Ref is 1->N; service enforces 1->1.
     sourceOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', default: null, index: true },
+    // The invoice a credit note reverses, or the quotation/challan an invoice came from.
+    // Service enforces the 1->1 rules; the ref itself is deliberately permissive.
+    sourceInvoice: { type: mongoose.Schema.Types.ObjectId, ref: 'Invoice', default: null, index: true },
+    sourceDocument: { type: mongoose.Schema.Types.ObjectId, ref: 'Invoice', default: null, index: true },
+    // Quotation only: the date the offer lapses.
+    validUntil: { type: Date, default: null },
+    // Credit note only: why the goods came back.
+    reason: { type: String, default: '', trim: true, maxlength: 500 },
     documentType: { type: String, enum: SALES_DOCUMENT_TYPES, default: 'invoice', required: true, index: true },
     documentNumber: { type: String, required: true, trim: true },
     invoiceNumber: { type: String, trim: true },
@@ -96,6 +113,29 @@ export const salesDocumentSchema = new mongoose.Schema(
       type: { type: String, enum: ['flat', 'percentage'], default: 'flat' },
       value: { type: Number, default: 0, min: 0 },
       amount: { type: Number, default: 0, min: 0 }
+    },
+    // GST place of supply. Absent on documents issued before the GST engine landed —
+    // renderers and returns treat a missing taxSummary as "legacy, single-rate".
+    placeOfSupply: {
+      code: { type: String, default: '', trim: true, maxlength: 2 },
+      state: { type: String, default: '', trim: true, maxlength: 80 }
+    },
+    supplyType: { type: String, enum: ['intra', 'inter'], default: 'intra' },
+    // HSN-wise rollup, the shape both the printed invoice and GSTR-1 need.
+    taxSummary: {
+      type: [
+        {
+          _id: false,
+          hsn: { type: String, default: '', trim: true, maxlength: 8 },
+          rate: { type: Number, default: 0, min: 0 },
+          taxableValue: { type: Number, default: 0, min: 0 },
+          cgst: { type: Number, default: 0, min: 0 },
+          sgst: { type: Number, default: 0, min: 0 },
+          igst: { type: Number, default: 0, min: 0 },
+          taxAmount: { type: Number, default: 0, min: 0 }
+        }
+      ],
+      default: []
     },
     total: { type: Number, required: true, min: 0 },
     paidAmount: { type: Number, default: 0, min: 0 },
