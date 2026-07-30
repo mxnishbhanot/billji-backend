@@ -3,6 +3,7 @@ import Notification from '../models/Notification.js';
 import UserNotificationPreference from '../models/UserNotificationPreference.js';
 import { NOTIFICATION_CHANNELS, NOTIFICATION_TYPES } from '../constants/notificationTypes.js';
 import { materializeReminderNotifications, serializeNotification } from '../services/notificationService.js';
+import { registerDeviceToken, removeDeviceToken } from '../services/pushService.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { getPagination, paginationMeta } from '../utils/pagination.js';
 
@@ -119,6 +120,25 @@ export const updateNotificationPreferences = asyncHandler(async (req, res) => {
     { upsert: true, new: true, lean: true }
   );
   res.json({ success: true, preferences: doc.preferences || {} });
+});
+
+// Device registration is per install, not per business: switching business re-registers
+// the same token so pushes follow the workspace the user is actually looking at.
+export const registerDevice = asyncHandler(async (req, res) => {
+  await registerDeviceToken({
+    business: req.business._id,
+    user: req.user._id,
+    token: req.body.token,
+    platform: req.body.platform,
+    deviceName: req.get('x-device-name') || ''
+  });
+  res.json({ success: true });
+});
+
+export const unregisterDevice = asyncHandler(async (req, res) => {
+  // Scoped to the caller so one user cannot silence another user's device.
+  await removeDeviceToken({ user: req.user._id, token: req.params.token });
+  res.json({ success: true });
 });
 
 export const dismissNotifications = asyncHandler(async (req, res) => {
