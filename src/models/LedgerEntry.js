@@ -1,8 +1,8 @@
 import mongoose from 'mongoose';
 
-export const LEDGER_ACCOUNTS = ['cash', 'bank', 'accounts_receivable', 'customer_credits', 'sales', 'refunds', 'adjustments'];
+export const LEDGER_ACCOUNTS = ['cash', 'bank', 'accounts_receivable', 'customer_credits', 'sales', 'refunds', 'adjustments', 'expenses', 'accounts_payable', 'inventory'];
 export const LEDGER_DIRECTIONS = ['debit', 'credit'];
-export const LEDGER_SOURCE_TYPES = ['invoice', 'payment', 'refund', 'adjustment'];
+export const LEDGER_SOURCE_TYPES = ['invoice', 'payment', 'refund', 'adjustment', 'credit_note', 'expense', 'purchase', 'vendor_payment'];
 
 const ledgerEntrySchema = new mongoose.Schema(
   {

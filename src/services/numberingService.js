@@ -20,8 +20,23 @@ export const financialYearFor = (date = new Date()) => {
 export const formatDocumentNumber = ({ prefix, financialYear, sequence }) =>
   `${prefix}-${financialYear}-${padSequence(sequence)}`;
 
+// Each document type carries its own prefix (INV/QTN/DC/CN) and its own financial-year
+// sequence, so the series stay separate as GST requires.
+const PREFIX_FIELDS = {
+  invoice: ['invoicePrefix', 'INV'],
+  quotation: ['quotationPrefix', 'QTN'],
+  delivery_challan: ['challanPrefix', 'DC'],
+  credit_note: ['creditNotePrefix', 'CN'],
+  purchase: ['purchasePrefix', 'PUR']
+};
+
+export const documentPrefixFor = (business, documentType = 'invoice') => {
+  const [field, fallback] = PREFIX_FIELDS[documentType] || PREFIX_FIELDS.invoice;
+  return business?.[field] || fallback;
+};
+
 export const nextDocumentNumber = async ({ business, documentType = 'invoice', date = new Date(), session }) => {
-  const prefix = business?.invoicePrefix || 'INV';
+  const prefix = documentPrefixFor(business, documentType);
   const financialYear = financialYearFor(date);
   const sequence = await NumberSequence.findOneAndUpdate(
     { business: business._id, documentType, financialYear },
@@ -71,7 +86,7 @@ export const previewOrderNumber = async ({ business } = {}) => {
 };
 
 export const previewDocumentNumber = async ({ business, documentType = 'invoice', date = new Date() }) => {
-  const prefix = business?.invoicePrefix || 'INV';
+  const prefix = documentPrefixFor(business, documentType);
   const financialYear = financialYearFor(date);
   const sequence = await NumberSequence.findOne({ business: business._id, documentType, financialYear }).lean();
 
