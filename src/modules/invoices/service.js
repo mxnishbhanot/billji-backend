@@ -107,7 +107,11 @@ export const duplicateInvoiceWorkflow = ({ req }) =>
         name: item.name,
         quantity: item.quantity,
         price: item.price,
-        sku: item.sku
+        sku: item.sku,
+        // Carry the per-item GST identity across, or a mixed-rate invoice would be
+        // duplicated at a single flattened rate.
+        hsn: item.hsn,
+        taxRate: item.taxRate
       })),
       taxRate: invoice.tax.rate,
       discountType: invoice.discount.type,

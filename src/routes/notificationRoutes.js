@@ -5,6 +5,8 @@ import {
   getNotificationPreferences,
   listNotifications,
   markNotificationsSeen,
+  registerDevice,
+  unregisterDevice,
   updateNotificationPreferences
 } from '../controllers/notificationController.js';
 import { protect } from '../middlewares/auth.js';
@@ -39,6 +41,15 @@ router.patch(
   validate,
   markNotificationsSeen
 );
+// Registering this device only needs a live session — a viewer-role member still gets
+// their own notifications, so this is deliberately not behind notificationsManage.
+router.post(
+  '/devices',
+  [body('token').isString().trim().isLength({ min: 8, max: 4096 }).withMessage('A device token is required'), body('platform').optional().isIn(['android', 'ios', 'web'])],
+  validate,
+  registerDevice
+);
+router.delete('/devices/:token', unregisterDevice);
 router.patch(
   '/dismiss',
   requirePermission(PERMISSIONS.notificationsManage),

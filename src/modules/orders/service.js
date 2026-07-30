@@ -2,6 +2,7 @@ import {
   buildCustomerSnapshot,
   buildInvoicePayload,
   normalizeItems,
+  resolveDocumentSupply,
   setInvoicePdfUrl,
   stockAdjustmentsForInvoice
 } from '../../services/invoiceService.js';
@@ -18,11 +19,16 @@ import { createOrderRecord, findInvoiceForOrder, findOrderById } from './reposit
 export const buildOrderPayload = async (user, business, payload, { session } = {}) => {
   const { customerId, snapshot } = await buildCustomerSnapshot(business._id, payload, { session });
   const items = await normalizeItems(business._id, payload.items, { allowOversell: true, session });
+  // Same place-of-supply resolution as the invoice path, so the tax an order quotes is
+  // the tax its generated invoice will charge.
+  const { supplyType } = resolveDocumentSupply(business, snapshot, payload);
   const totals = calculateInvoiceTotals({
     items,
     taxRate: payload.taxRate,
     discountType: payload.discountType,
-    discountValue: payload.discountValue
+    discountValue: payload.discountValue,
+    supplyType,
+    pricesIncludeTax: Boolean(business?.taxSettings?.pricesIncludeTax)
   });
   const date = payload.date ? new Date(payload.date) : new Date();
   const orderNumber = await nextOrderNumber({ business, session });
@@ -123,6 +129,8 @@ export const generateInvoiceForOrderWorkflow = ({ req }) =>
         productId: item.product || undefined,
         name: item.name,
         sku: item.sku,
+        hsn: item.hsn,
+        taxRate: item.taxRate,
         quantity: item.quantity,
         price: item.price
       })),

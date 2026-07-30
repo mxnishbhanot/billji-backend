@@ -4,6 +4,7 @@ import Product from '../models/Product.js';
 import { domainStatusesForLegacy, legacyStatusFor } from '../models/SalesDocument.js';
 import StockMovement from '../models/StockMovement.js';
 import { env } from '../config/env.js';
+import { resolvePlaceOfSupply, stateCodeFromGstin, stateCodeFromName, supplyTypeFor } from '../constants/gstStates.js';
 import { ApiError } from '../utils/ApiError.js';
 import { calculateInvoiceTotals } from '../utils/invoiceMath.js';
 import { nextDocumentNumber } from './numberingService.js';
@@ -40,9 +41,14 @@ export const serializeInvoice = (invoice, req) => {
   const paidAmount = data.paidAmount ?? (data.paymentStatus === 'paid' || data.paymentStatus === 'refunded' ? data.total : 0);
   const balanceDue = data.balanceDue ?? Math.max(Number(data.total || 0) - Number(paidAmount || 0), 0);
 
+  const documentType = data.documentType || 'invoice';
+
   return {
     ...data,
-    invoiceNumber: invoice.invoiceNumber || invoice.documentNumber,
+    // Only invoices report an invoiceNumber. The fallback exists for legacy invoice rows
+    // written before documentNumber; letting a quotation borrow it would make a quote look
+    // like a tax invoice to every client that reads this field.
+    ...(documentType === 'invoice' ? { invoiceNumber: invoice.invoiceNumber || invoice.documentNumber } : {}),
     status: invoice.status || legacyStatusFor(invoice),
     paidAmount,
     balanceDue,
@@ -113,6 +119,19 @@ export const buildCustomerSnapshot = async (businessId, payload, { session } = {
   };
 };
 
+/**
+ * The rate this line should be taxed at, or undefined to inherit the document rate.
+ *
+ * `Product.taxRate` defaults to 0, so a stored 0 means "never configured" far more often
+ * than it means "exempt" — treating it as an explicit 0% would silently drop tax to zero
+ * on every existing product. An explicit rate in the request always wins, including 0,
+ * which is how a genuinely exempt line is billed.
+ */
+const resolveItemTaxRate = (requested, productRate) => {
+  if (requested !== undefined && requested !== null && requested !== '') return Number(requested);
+  return Number(productRate) > 0 ? Number(productRate) : undefined;
+};
+
 export const normalizeItems = async (businessId, items, { allowOversell = false, session } = {}) => {
   if (!Array.isArray(items) || items.length === 0) {
     throw new ApiError(422, 'At least one invoice item is required');
@@ -142,11 +161,12 @@ export const normalizeItems = async (businessId, items, { allowOversell = false,
         product: product._id,
         name: product.name,
         sku: product.sku,
+        hsn: item.hsn ?? product.hsn ?? '',
         unit: product.unit,
         quantity,
         price: item.price ?? product.price,
         purchasePrice: product.purchasePrice,
-        taxRate: item.taxRate ?? product.taxRate,
+        taxRate: resolveItemTaxRate(item.taxRate, product.taxRate),
         isCustom: false
       });
     } else {
@@ -154,10 +174,13 @@ export const normalizeItems = async (businessId, items, { allowOversell = false,
         product: null,
         name: item.name,
         sku: item.sku || '',
+        hsn: item.hsn || '',
         unit: item.unit || 'pcs',
         quantity: item.quantity,
         price: item.price,
-        taxRate: item.taxRate || 0,
+        // Custom lines have no product to inherit from; undefined means "use the
+        // document rate", matching how custom items behaved before per-item GST.
+        taxRate: resolveItemTaxRate(item.taxRate, 0),
         isCustom: true
       });
     }
@@ -188,27 +211,58 @@ export const normalizeItems = async (businessId, items, { allowOversell = false,
   return normalized;
 };
 
-export const buildInvoicePayload = async (user, business, payload, { session } = {}) => {
+/**
+ * Where the supply is deemed to happen, and therefore whether it is CGST+SGST or IGST.
+ * Shared by the invoice, order and preview paths so all three agree.
+ */
+export const resolveDocumentSupply = (business, snapshot, payload = {}) => {
+  const supplierStateCode = business?.stateCode || stateCodeFromGstin(business?.gstNumber) || stateCodeFromName(business?.state);
+  const placeOfSupply = resolvePlaceOfSupply({
+    explicitCode: payload.placeOfSupplyCode,
+    customerGstin: snapshot?.taxIdentifiers?.gstNumber || snapshot?.gstNumber,
+    customerState: snapshot?.billingAddress?.state || snapshot?.shippingAddress?.state,
+    supplierStateCode
+  });
+
+  return { supplierStateCode, placeOfSupply, supplyType: supplyTypeFor(supplierStateCode, placeOfSupply.code) };
+};
+
+/**
+ * Builds a sales document of any type.
+ *
+ * `documentType` only affects identity here — the number series, and whether the legacy
+ * `invoiceNumber` field is populated (invoices keep it for back-compat; other types leave
+ * it unset so the unique index on it stays free). Stock, ledger and lifecycle effects are
+ * the caller's business, driven by the per-type rules in modules/documents.
+ */
+export const buildSalesDocumentPayload = async (user, business, payload, { session, documentType = 'invoice' } = {}) => {
   const { customerId, snapshot } = await buildCustomerSnapshot(business._id, payload, { session });
   const items = await normalizeItems(business._id, payload.items, { allowOversell: Boolean(payload.allowOversell), session });
+  const { placeOfSupply, supplyType } = resolveDocumentSupply(business, snapshot, payload);
   const totals = calculateInvoiceTotals({
     items,
     taxRate: payload.taxRate,
     discountType: payload.discountType,
-    discountValue: payload.discountValue
+    discountValue: payload.discountValue,
+    supplyType,
+    pricesIncludeTax: Boolean(business?.taxSettings?.pricesIncludeTax)
   });
   const date = payload.date ? new Date(payload.date) : new Date();
-  const invoiceNumber = payload.invoiceNumber || (await generateInvoiceNumber(business, date, { session }));
+  const documentNumber =
+    payload.invoiceNumber || payload.documentNumber || (await nextDocumentNumber({ business, documentType, date, session }));
   const domainStatuses = domainStatusesForLegacy(payload.status || 'pending');
+  const isInvoice = documentType === 'invoice';
 
   return {
     business: business._id,
     createdBy: user._id,
     updatedBy: user._id,
     customer: customerId,
-    documentType: 'invoice',
-    documentNumber: invoiceNumber,
-    invoiceNumber,
+    documentType,
+    documentNumber,
+    // Only invoices carry invoiceNumber: it has a unique partial index, and a quotation
+    // sharing the invoice series would collide with a real invoice.
+    ...(isInvoice ? { invoiceNumber: documentNumber } : {}),
     date,
     dueDate: payload.dueDate || null,
     customerSnapshot: snapshot,
@@ -216,6 +270,9 @@ export const buildInvoicePayload = async (user, business, payload, { session } =
     subtotal: totals.subtotal,
     tax: totals.tax,
     discount: totals.discount,
+    placeOfSupply,
+    supplyType,
+    taxSummary: totals.taxSummary,
     total: totals.total,
     paidAmount: payload.status === 'paid' ? totals.total : 0,
     balanceDue: payload.status === 'paid' ? 0 : totals.total,
@@ -224,11 +281,19 @@ export const buildInvoicePayload = async (user, business, payload, { session } =
     fulfillmentStatus: 'pending',
     status: payload.status || 'pending',
     notes: payload.notes || '',
+    // A quotation states how long the offer stands; other types ignore it.
+    ...(payload.validUntil ? { validUntil: new Date(payload.validUntil) } : {}),
+    ...(payload.sourceInvoice ? { sourceInvoice: payload.sourceInvoice } : {}),
+    ...(payload.reason ? { reason: String(payload.reason).slice(0, 500) } : {}),
     shareToken: crypto.randomBytes(24).toString('hex'),
     shareExpiresAt: new Date(Date.now() + DEFAULT_SHARE_LINK_TTL_MS),
     pdfUrl: `${env.apiPublicUrl}/api/public/invoices/__pending__/pdf`
   };
 };
+
+/** Invoice-shaped wrapper kept so every existing caller reads unchanged. */
+export const buildInvoicePayload = (user, business, payload, options = {}) =>
+  buildSalesDocumentPayload(user, business, payload, { ...options, documentType: 'invoice' });
 
 export const setInvoicePdfUrl = async (invoice, req, { session } = {}) => {
   invoice.pdfUrl = buildPublicInvoicePdfUrl(invoice, req);

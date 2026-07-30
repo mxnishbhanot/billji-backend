@@ -7,9 +7,6 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 
 const ORIENTATION_STATUSES = new Set(['pending', 'in_progress', 'completed', 'dismissed']);
-const CHECKLIST_STATUSES = new Set(['active', 'completed', 'dismissed']);
-const ITEM_STATUSES = new Set(['pending', 'completed', 'skipped']);
-const ITEM_METHODS = new Set(['action', 'detected', 'skipped']);
 const TIP_STATUSES = new Set(['pending', 'seen', 'completed', 'dismissed', 'snoozed']);
 
 const isProfileComplete = (business) => {
@@ -43,12 +40,6 @@ const serializeProgress = (doc) => ({
     currentStep: doc.orientation?.currentStep || '',
     completedAt: doc.orientation?.completedAt || null,
     dismissedAt: doc.orientation?.dismissedAt || null
-  },
-  checklist: {
-    status: doc.checklist?.status || 'active',
-    dismissedAt: doc.checklist?.dismissedAt || null,
-    completedAt: doc.checklist?.completedAt || null,
-    items: mapToObject(doc.checklist?.items)
   },
   tips: mapToObject(doc.tips),
   updatedAt: doc.updatedAt
@@ -105,7 +96,7 @@ export const getOnboardingProgress = asyncHandler(async (req, res) => {
 export const patchOnboardingProgress = asyncHandler(async (req, res) => {
   const roleKey = req.membership?.roleKey || req.user?.roleKey || '';
   const doc = await getOrCreateProgress(req.user._id, req.business._id, roleKey);
-  const { orientation, checklist, tips } = req.body || {};
+  const { orientation, tips } = req.body || {};
 
   if (orientation && typeof orientation === 'object') {
     if (orientation.tourId != null) doc.orientation.tourId = String(orientation.tourId).slice(0, 80);
@@ -121,48 +112,6 @@ export const patchOnboardingProgress = asyncHandler(async (req, res) => {
       }
     }
     if (orientation.currentStep != null) doc.orientation.currentStep = String(orientation.currentStep).slice(0, 80);
-  }
-
-  if (checklist && typeof checklist === 'object') {
-    if (checklist.status != null) {
-      if (!CHECKLIST_STATUSES.has(checklist.status)) throw new ApiError(400, 'Invalid checklist status');
-      doc.checklist.status = checklist.status;
-      if (checklist.status === 'dismissed' && !doc.checklist.dismissedAt) {
-        doc.checklist.dismissedAt = new Date();
-      }
-      if (checklist.status === 'completed' && !doc.checklist.completedAt) {
-        doc.checklist.completedAt = new Date();
-      }
-      if (checklist.status === 'active') {
-        doc.checklist.dismissedAt = null;
-      }
-    }
-
-    if (checklist.items && typeof checklist.items === 'object') {
-      for (const [taskKey, raw] of Object.entries(checklist.items)) {
-        if (!raw || typeof raw !== 'object') continue;
-        const key = String(taskKey).slice(0, 80);
-        const existing = doc.checklist.items.get(key) || { status: 'pending', completedAt: null, method: null };
-        const next = { ...existing };
-
-        if (raw.status != null) {
-          if (!ITEM_STATUSES.has(raw.status)) throw new ApiError(400, `Invalid item status for ${key}`);
-          next.status = raw.status;
-          if (raw.status === 'completed' || raw.status === 'skipped') {
-            next.completedAt = raw.completedAt ? new Date(raw.completedAt) : new Date();
-          }
-          if (raw.status === 'pending') {
-            next.completedAt = null;
-            next.method = null;
-          }
-        }
-        if (raw.method != null) {
-          if (!ITEM_METHODS.has(raw.method)) throw new ApiError(400, `Invalid item method for ${key}`);
-          next.method = raw.method;
-        }
-        doc.checklist.items.set(key, next);
-      }
-    }
   }
 
   if (tips && typeof tips === 'object') {
@@ -207,26 +156,13 @@ export const patchOnboardingProgress = asyncHandler(async (req, res) => {
 export const replayOnboarding = asyncHandler(async (req, res) => {
   const roleKey = req.membership?.roleKey || req.user?.roleKey || '';
   const doc = await getOrCreateProgress(req.user._id, req.business._id, roleKey);
-  const { orientation = true, checklist = false, resetChecklist = false, tipIds = [] } = req.body || {};
+  const { orientation = true, tipIds = [] } = req.body || {};
 
   if (orientation) {
     doc.orientation.status = 'pending';
     doc.orientation.currentStep = '';
     doc.orientation.completedAt = null;
     doc.orientation.dismissedAt = null;
-  }
-
-  if (checklist) {
-    doc.checklist.status = 'active';
-    doc.checklist.dismissedAt = null;
-    doc.checklist.completedAt = null;
-  }
-
-  if (resetChecklist) {
-    doc.checklist.items = new Map();
-    doc.checklist.status = 'active';
-    doc.checklist.dismissedAt = null;
-    doc.checklist.completedAt = null;
   }
 
   if (Array.isArray(tipIds)) {

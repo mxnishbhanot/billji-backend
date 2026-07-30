@@ -70,7 +70,7 @@ export const allocationTotalForInvoice = async (businessId, invoiceId, { session
 };
 
 export const customerBalanceTotals = async (businessId, customerId, { session } = {}) => {
-  const [invoiceTotals, allocationTotals, unappliedTotals] = await Promise.all([
+  const [invoiceTotals, allocationTotals, unappliedTotals, creditNoteTotals] = await Promise.all([
     Invoice.aggregate([
       {
         $match: {
@@ -95,16 +95,31 @@ export const customerBalanceTotals = async (businessId, customerId, { session } 
     Payment.aggregate([
       { $match: { business: businessId, customer: customerId, status: 'completed' } },
       { $group: { _id: null, total: { $sum: '$unappliedAmount' } } }
+    ]).session(session || null),
+    // Issued credit notes reduce what the customer owes — without this, crediting a
+    // return would leave the original due standing in full.
+    Invoice.aggregate([
+      {
+        $match: {
+          business: businessId,
+          documentType: 'credit_note',
+          customer: customerId,
+          documentStatus: { $nin: ['cancelled', 'void'] }
+        }
+      },
+      { $group: { _id: null, total: { $sum: '$total' } } }
     ]).session(session || null)
   ]);
 
   const invoiced = invoiceTotals[0]?.total || 0;
   const allocated = allocationTotals[0]?.total || 0;
   const unapplied = unappliedTotals[0]?.total || 0;
+  const credited = creditNoteTotals[0]?.total || 0;
+  const netInvoiced = invoiced - credited;
 
   return {
-    outstandingDues: Math.max(invoiced - allocated, 0),
-    creditBalance: Math.max(allocated + unapplied - invoiced, 0)
+    outstandingDues: Math.max(netInvoiced - allocated, 0),
+    creditBalance: Math.max(allocated + unapplied - netInvoiced, 0)
   };
 };
 

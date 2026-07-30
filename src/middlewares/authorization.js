@@ -21,6 +21,11 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.customersView,
     PERMISSIONS.customersManage,
     PERMISSIONS.productsView,
+    // An accountant is exactly who should be booking money going out.
+    PERMISSIONS.expensesView,
+    PERMISSIONS.expensesManage,
+    PERMISSIONS.purchasesView,
+    PERMISSIONS.purchasesManage,
     PERMISSIONS.reportsView,
     PERMISSIONS.notificationsView,
     PERMISSIONS.notificationsManage
@@ -42,6 +47,8 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.paymentsView,
     PERMISSIONS.customersView,
     PERMISSIONS.productsView,
+    PERMISSIONS.expensesView,
+    PERMISSIONS.purchasesView,
     PERMISSIONS.reportsView,
     PERMISSIONS.notificationsView,
     PERMISSIONS.settingsView

@@ -98,6 +98,16 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   const taxAmount = Number(invoice.tax?.amount || 0);
   const taxRate = Number(invoice.tax?.rate || 0);
 
+  // GST-aware rendering only when the document carries a tax summary. Invoices issued
+  // before the GST engine have none and keep the exact layout they were printed with.
+  const taxSummary = Array.isArray(invoice.taxSummary) ? invoice.taxSummary : [];
+  const isGstDocument = taxSummary.length > 0;
+  const isInterState = invoice.supplyType === 'inter';
+  const showHsnColumn = isGstDocument && taxSummary.some((row) => row.hsn);
+  const cgstTotal = taxSummary.reduce((sum, row) => sum + Number(row.cgst || 0), 0);
+  const sgstTotal = taxSummary.reduce((sum, row) => sum + Number(row.sgst || 0), 0);
+  const igstTotal = taxSummary.reduce((sum, row) => sum + Number(row.igst || 0), 0);
+
   const logoHtml = tpl.showLogo && isLogoData(business.logoUrl)
     ? `<img class="logo" src="${business.logoUrl}" alt="logo" />`
     : '';
@@ -117,7 +127,12 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     joinLines([business.phone, business.email]).join('  |  '),
     ...businessAddress(business),
     business.gstNumber ? `GSTIN: ${business.gstNumber}` : '',
-    business.panNumber ? `PAN: ${business.panNumber}` : ''
+    business.panNumber ? `PAN: ${business.panNumber}` : '',
+    // Place of supply belongs on the buyer-facing document; showing it beside the
+    // supplier block keeps the meta row from overflowing on narrow A4 margins.
+    isGstDocument && invoice.placeOfSupply?.state
+      ? `Place of supply: ${invoice.placeOfSupply.state}${isInterState ? ' (inter-state)' : ''}`
+      : ''
   ];
   const toLines = [joinLines([customer.phone, customer.email]).join('  |  '), ...customerAddress(customer), customerTaxLabel(customer)];
 
@@ -129,16 +144,61 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
           <div class="item-name">${escapeHtml(item.name)}</div>
           ${item.sku ? `<div class="item-sku">SKU: ${escapeHtml(item.sku)}</div>` : ''}
         </td>
+        ${showHsnColumn ? `<td class="c-hsn">${escapeHtml(item.hsn || '-')}</td>` : ''}
         <td class="c-qty">${escapeHtml(item.unit ? `${item.quantity} ${item.unit}` : item.quantity)}</td>
         <td class="c-rate">${currency(item.price)}</td>
+        ${isGstDocument ? `<td class="c-gst">${Number(item.taxRate || 0)}%</td>` : ''}
         <td class="c-amt">${currency(item.total)}</td>
       </tr>`
     )
     .join('');
 
+  // HSN-wise tax breakup — required on a GST invoice and the same grouping GSTR-1 files.
+  const taxSummaryHtml = isGstDocument
+    ? `
+    <div class="tax-summary">
+      <div class="party-label">TAX SUMMARY${invoice.placeOfSupply?.state ? ` &middot; PLACE OF SUPPLY: ${escapeHtml(invoice.placeOfSupply.state)}` : ''}</div>
+      <table class="tax-table">
+        <thead>
+          <tr>
+            <th>${showHsnColumn ? 'HSN/SAC' : 'Rate'}</th>
+            ${showHsnColumn ? '<th>Rate</th>' : ''}
+            <th>Taxable</th>
+            ${isInterState ? '<th>IGST</th>' : '<th>CGST</th><th>SGST</th>'}
+            <th>Total tax</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${taxSummary
+            .map(
+              (row) => `
+            <tr>
+              <td>${showHsnColumn ? escapeHtml(row.hsn || '-') : `${Number(row.rate || 0)}%`}</td>
+              ${showHsnColumn ? `<td>${Number(row.rate || 0)}%</td>` : ''}
+              <td>${currency(row.taxableValue)}</td>
+              ${isInterState ? `<td>${currency(row.igst)}</td>` : `<td>${currency(row.cgst)}</td><td>${currency(row.sgst)}</td>`}
+              <td>${currency(row.taxAmount)}</td>
+            </tr>`
+            )
+            .join('')}
+        </tbody>
+      </table>
+    </div>`
+    : '';
+
   const totalRows = [`<div class="t-row"><span>Subtotal</span><span>${currency(invoice.subtotal)}</span></div>`];
   if (discountAmount > 0) totalRows.push(`<div class="t-row"><span>Discount</span><span>-${currency(discountAmount)}</span></div>`);
-  if (taxAmount > 0 || taxRate > 0) totalRows.push(`<div class="t-row"><span>Tax (${taxRate}%)</span><span>${currency(taxAmount)}</span></div>`);
+  if (isGstDocument) {
+    // A GST invoice must show the tax heads separately, never one merged "Tax" line.
+    if (isInterState) {
+      if (igstTotal > 0) totalRows.push(`<div class="t-row"><span>IGST</span><span>${currency(igstTotal)}</span></div>`);
+    } else {
+      if (cgstTotal > 0) totalRows.push(`<div class="t-row"><span>CGST</span><span>${currency(cgstTotal)}</span></div>`);
+      if (sgstTotal > 0) totalRows.push(`<div class="t-row"><span>SGST</span><span>${currency(sgstTotal)}</span></div>`);
+    }
+  } else if (taxAmount > 0 || taxRate > 0) {
+    totalRows.push(`<div class="t-row"><span>Tax (${taxRate}%)</span><span>${currency(taxAmount)}</span></div>`);
+  }
   totalRows.push(`<div class="t-row t-total"><span>Total</span><span>${currency(invoice.total)}</span></div>`);
   if (tpl.showPaymentRows) totalRows.push(`<div class="t-row"><span>Paid</span><span>${currency(paidAmount)}</span></div>`);
 
@@ -213,6 +273,8 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   thead th:last-child { border-radius: 0 6px 6px 0; }
   tbody td { padding: 11px 10px; border-bottom: 1px solid #eef1f5; vertical-align: top; }
   .c-desc { text-align: left; width: 52%; }
+  .c-hsn { text-align: right; color: #64748b; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .c-gst { text-align: right; color: #64748b; white-space: nowrap; }
   .c-qty { text-align: right; color: #64748b; white-space: nowrap; }
   .c-rate { text-align: right; color: #64748b; white-space: nowrap; }
   .c-amt { text-align: right; font-weight: 700; white-space: nowrap; }
@@ -228,6 +290,13 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   .t-balance { display: flex; justify-content: space-between; align-items: baseline; margin-top: 8px; padding-top: 8px; border-top: 1px solid #e2e8f0; }
   .t-balance span:first-child { font-size: 13px; font-weight: 800; color: var(--accent); }
   .t-balance span:last-child { font-size: 20px; font-weight: 800; color: var(--accent); }
+
+  .tax-summary { margin-top: 20px; }
+  .tax-table { margin-top: 6px; }
+  .tax-table thead th { background: #f8fafc; color: #64748b; font-size: 9px; padding: 6px 8px; border-radius: 0; }
+  .tax-table thead th:first-child { text-align: left; }
+  .tax-table tbody td { padding: 6px 8px; font-size: 11px; text-align: right; border-bottom: 1px solid #f1f5f9; font-variant-numeric: tabular-nums; }
+  .tax-table tbody td:first-child { text-align: left; }
 
   .footer-block { display: flex; justify-content: space-between; align-items: flex-end; gap: 28px; margin-top: 26px; }
   .notes { flex: 1; max-width: 420px; }
@@ -276,12 +345,14 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
 
     <table>
       <thead>
-        <tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>
+        <tr><th>Description</th>${showHsnColumn ? '<th>HSN/SAC</th>' : ''}<th>Qty</th><th>Rate</th>${isGstDocument ? '<th>GST</th>' : ''}<th>Amount</th></tr>
       </thead>
       <tbody>${itemsHtml}</tbody>
     </table>
 
     <div class="totals"><div class="totals-box">${totalRows.join('')}${balanceHtml}</div></div>
+
+    ${taxSummaryHtml}
 
     <div class="footer-block">${footerInner}</div>
 

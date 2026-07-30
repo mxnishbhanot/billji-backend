@@ -50,6 +50,10 @@ const getApp = () => {
 
 export const isFirebaseConfigured = () => Boolean(getApp());
 
+// Shared app handle for other Firebase services (push messaging). Null when the
+// server has no credentials — callers degrade instead of throwing.
+export const getFirebaseApp = () => getApp();
+
 // Verify a Google ID token minted on the device. Returns the decoded token
 // ({ uid, email, name, picture, email_verified, ... }) or throws.
 export const verifyGoogleIdToken = async (idToken) => {
