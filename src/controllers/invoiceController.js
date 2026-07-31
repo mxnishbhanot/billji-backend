@@ -66,6 +66,7 @@ const SORT_OPTIONS = {
 
 export const invoiceQueryRules = [
   query('search').optional({ checkFalsy: true }).trim().isLength({ max: 80 }),
+  query('customerId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid customer id'),
   query('status').optional({ checkFalsy: true }).isIn(['pending', 'paid', 'cancelled']),
   query('from').optional({ checkFalsy: true }).isISO8601(),
   query('to').optional({ checkFalsy: true }).isISO8601(),
@@ -77,11 +78,15 @@ export const invoiceQueryRules = [
 ];
 
 export const listInvoices = asyncHandler(async (req, res) => {
-  const { search = '', status, from, to, minAmount, maxAmount, sort } = req.query;
+  const { search = '', status, from, to, minAmount, maxAmount, sort, customerId } = req.query;
   const filter = { business: req.business._id, documentType: 'invoice' };
 
   if (status) {
     filter.status = status;
+  }
+
+  if (customerId) {
+    filter.customer = customerId;
   }
 
   if (from || to) {
