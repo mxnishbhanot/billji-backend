@@ -14,6 +14,7 @@ import {
   resolveDocumentSupply,
   serializeInvoice
 } from '../services/invoiceService.js';
+import { DOCUMENT_KINDS } from '../modules/documents/documentTypes.js';
 import { DEFAULT_REMINDER_TEMPLATE, listPendingReminders, sendReminders } from '../services/reminderService.js';
 import { sendInvoiceEmail } from '../services/emailService.js';
 import { buildInvoiceHtml } from '../services/invoiceHtml.js';
@@ -151,7 +152,12 @@ export const previewInvoice = asyncHandler(async (req, res) => {
     pricesIncludeTax: Boolean(req.business?.taxSettings?.pricesIncludeTax)
   });
 
+  // The builder previews quotations and challans through this endpoint too — the type
+  // decides the title, watermark and disclaimer the customer will see on the PDF.
+  const documentType = DOCUMENT_KINDS.includes(req.body.documentType) ? req.body.documentType : 'invoice';
+
   const previewInvoiceData = {
+    documentType,
     invoiceNumber: `${req.business.invoicePrefix || 'INV'}-PREVIEW`,
     date: new Date().toISOString(),
     dueDate: null,
@@ -237,7 +243,9 @@ export const downloadInvoicePdf = asyncHandler(async (req, res) => {
 });
 
 export const publicInvoicePdf = asyncHandler(async (req, res) => {
-  const invoice = await Invoice.findOne({ _id: req.params.id, shareToken: req.params.token, documentType: 'invoice' }).populate('business');
+  // Any sales document, not only tax invoices: a quotation or challan is shared with the
+  // same tokenised link, and the template stamps it for what it is.
+  const invoice = await Invoice.findOne({ _id: req.params.id, shareToken: req.params.token }).populate('business');
 
   if (!invoice) {
     throw new ApiError(404, 'Invoice not found');
@@ -254,7 +262,7 @@ export const publicInvoicePdf = asyncHandler(async (req, res) => {
   const pdf = await getOrRenderInvoicePdf(invoice, invoice.business);
 
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${invoice.invoiceNumber}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${invoice.invoiceNumber || invoice.documentNumber}.pdf"`);
   res.send(pdf);
 });
 

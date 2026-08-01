@@ -69,6 +69,30 @@ const resolveTemplate = (business = {}) => {
 
 const isLogoData = (logoUrl = '') => /^data:image\/(?:png|jpe?g);base64,/i.test(logoUrl);
 
+// Per-document identity. A quotation or challan must never be mistaken for the tax
+// invoice — buyers routinely forward a quote internally for approval, so it carries a
+// diagonal watermark and an explicit "not a tax invoice" line as well as its own title.
+const DOCUMENT_META = {
+  invoice: { title: 'INVOICE', noun: 'invoice' },
+  quotation: {
+    title: 'QUOTATION',
+    noun: 'quotation',
+    watermark: 'QUOTATION',
+    disclaimer:
+      'This is a quotation, not a tax invoice or a bill. No goods or services have been supplied and no payment is due against this document. A tax invoice will be issued separately once this quotation is approved and the order is placed. Prices and availability are subject to change until then.'
+  },
+  delivery_challan: {
+    title: 'DELIVERY CHALLAN',
+    noun: 'delivery challan',
+    watermark: 'CHALLAN',
+    disclaimer:
+      'This is a delivery challan, not a tax invoice or a bill. It accompanies the goods listed above; the amounts shown are for reference only. A tax invoice will be issued separately for payment.'
+  },
+  credit_note: { title: 'CREDIT NOTE', noun: 'credit note' }
+};
+
+const metaFor = (documentType) => DOCUMENT_META[documentType] || DOCUMENT_META.invoice;
+
 const partyBlock = (label, lead, lines) => `
   <div class="party">
     <div class="party-label">${escapeHtml(label)}</div>
@@ -81,6 +105,10 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   const tpl = resolveTemplate(business);
   const accent = tpl.accentColor;
   const customer = invoice.customerSnapshot || {};
+  const doc = metaFor(invoice.documentType || options.documentType);
+  // Paid / balance / payment status only mean something on a tax invoice. Printing them
+  // on a quotation reads as money already owed.
+  const showPaymentRows = tpl.showPaymentRows && doc.noun === 'invoice';
 
   // paymentStatus is authoritative: a 'paid' invoice always renders fully paid and
   // 'unpaid' renders zero, even if the denormalized paidAmount/balanceDue are stale
@@ -116,12 +144,17 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   // receipts. When there's no real due date, show the amount paid instead — concrete
   // info the customer can use.
   const dueDateText = formatDate(invoice.dueDate);
-  const metaCells = [
-    ['Issue date', formatDate(invoice.date) || '-'],
-    dueDateText ? ['Due date', dueDateText] : ['Amount paid', currency(paidAmount)],
-    ['Payment', statusText(invoice.paymentStatus || invoice.status || 'unpaid')]
-  ];
-  if (tpl.showPaymentRows) metaCells.push(['Balance', currency(balanceDue)]);
+  const validUntilText = formatDate(invoice.validUntil);
+  const metaCells = [['Issue date', formatDate(invoice.date) || '-']];
+
+  if (doc.noun === 'invoice') {
+    metaCells.push(dueDateText ? ['Due date', dueDateText] : ['Amount paid', currency(paidAmount)]);
+    metaCells.push(['Payment', statusText(invoice.paymentStatus || invoice.status || 'unpaid')]);
+    if (showPaymentRows) metaCells.push(['Balance', currency(balanceDue)]);
+  } else {
+    if (validUntilText) metaCells.push(['Valid until', validUntilText]);
+    metaCells.push(['Document', doc.title]);
+  }
 
   const fromLines = [
     joinLines([business.phone, business.email]).join('  |  '),
@@ -200,9 +233,9 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     totalRows.push(`<div class="t-row"><span>Tax (${taxRate}%)</span><span>${currency(taxAmount)}</span></div>`);
   }
   totalRows.push(`<div class="t-row t-total"><span>Total</span><span>${currency(invoice.total)}</span></div>`);
-  if (tpl.showPaymentRows) totalRows.push(`<div class="t-row"><span>Paid</span><span>${currency(paidAmount)}</span></div>`);
+  if (showPaymentRows) totalRows.push(`<div class="t-row"><span>Paid</span><span>${currency(paidAmount)}</span></div>`);
 
-  const balanceHtml = tpl.showPaymentRows
+  const balanceHtml = showPaymentRows
     ? `<div class="t-balance"><span>Balance due</span><span>${currency(balanceDue)}</span></div>`
     : '';
 
@@ -216,7 +249,11 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     : '<div class="sign-line"></div>';
   const signBlock = tpl.showSignature
     ? `<div class="sign">${signImg}<div class="sign-text">Authorized signatory</div></div>`
-    : '<div class="sign sign-auto"><div class="sign-note">This is an electronically generated invoice;<br/>no signature is required.</div></div>';
+    : `<div class="sign sign-auto"><div class="sign-note">This is an electronically generated ${escapeHtml(doc.noun)};<br/>no signature is required.</div></div>`;
+  const disclaimerHtml = doc.disclaimer
+    ? `<div class="disclaimer"><span class="disclaimer-tag">NOT A TAX INVOICE</span>${escapeHtml(doc.disclaimer)}</div>`
+    : '';
+  const watermarkHtml = doc.watermark ? `<div class="watermark">${escapeHtml(doc.watermark)}</div>` : '';
   const footerInner = `
     ${tpl.showNotes ? `<div class="notes"><div class="party-label">NOTES &amp; TERMS</div><div class="notes-text">${escapeHtml(notes)}</div></div>` : '<div class="notes"></div>'}
     ${signBlock}
@@ -242,7 +279,24 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     background: #fff; width: 794px; min-height: 1123px;
     margin: 0 auto; padding: 48px 46px 36px;
     display: flex; flex-direction: column;
+    position: relative; overflow: hidden;
   }
+  /* Diagonal stamp behind the content. Kept light enough to print over and read
+     through — it marks the sheet, it must not fight the numbers on it. */
+  .watermark {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%) rotate(-32deg);
+    font-size: 108px; font-weight: 800; letter-spacing: 8px; white-space: nowrap;
+    color: var(--accent); opacity: 0.08; pointer-events: none; z-index: 0;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .page > *:not(.watermark) { position: relative; z-index: 1; }
+  .disclaimer {
+    margin-top: 18px; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--accent); background: var(--accent-tint);
+    font-size: 11px; line-height: 1.5; color: #334155;
+  }
+  .disclaimer-tag { display: block; font-size: 9.5px; font-weight: 800; letter-spacing: .6px; color: var(--accent); margin-bottom: 3px; }
   .rule { height: 1px; background: #e2e8f0; margin: 14px 0; }
 
   .header { display: flex; justify-content: space-between; align-items: flex-start; }
@@ -319,12 +373,13 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
 </head>
 <body>
   <div class="page">
+    ${watermarkHtml}
     <div class="header">
       <div class="header-left">
         ${logoHtml}
-        <div class="title">INVOICE</div>
+        <div class="title">${escapeHtml(doc.title)}</div>
       </div>
-      <div class="number">${escapeHtml(invoice.invoiceNumber || '-')}</div>
+      <div class="number">${escapeHtml(invoice.invoiceNumber || invoice.documentNumber || '-')}</div>
     </div>
     <div class="rule"></div>
 
@@ -332,7 +387,7 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
       ${metaCells
         .map(
           ([label, value], i) =>
-            `<div class="meta-cell${tpl.showPaymentRows && i === metaCells.length - 1 ? ' accent' : ''}"><div class="meta-label">${escapeHtml(label.toUpperCase())}</div><div class="meta-value">${escapeHtml(value)}</div></div>`
+            `<div class="meta-cell${showPaymentRows && i === metaCells.length - 1 ? ' accent' : ''}"><div class="meta-label">${escapeHtml(label.toUpperCase())}</div><div class="meta-value">${escapeHtml(value)}</div></div>`
         )
         .join('')}
     </div>
@@ -353,6 +408,8 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     <div class="totals"><div class="totals-box">${totalRows.join('')}${balanceHtml}</div></div>
 
     ${taxSummaryHtml}
+
+    ${disclaimerHtml}
 
     <div class="footer-block">${footerInner}</div>
 
