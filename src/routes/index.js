@@ -20,6 +20,7 @@ import publicRoutes from './publicRoutes.js';
 import reportRoutes from './reportRoutes.js';
 import roleRoutes from './roleRoutes.js';
 import settingsRoutes from './settingsRoutes.js';
+import syncRoutes from '../modules/sync/routes.js';
 import teamRoutes from './teamRoutes.js';
 
 const router = Router();
@@ -45,6 +46,7 @@ router.use('/purchases', purchaseRoutes);
 router.use('/reports', reportRoutes);
 router.use('/roles', roleRoutes);
 router.use('/settings', settingsRoutes);
+router.use('/sync', syncRoutes);
 router.use('/team', teamRoutes);
 
 export default router;

@@ -204,7 +204,10 @@ export const updateCustomer = asyncHandler(async (req, res) => {
 });
 
 export const deleteCustomer = asyncHandler(async (req, res) => {
-  const customer = await Customer.findOneAndDelete({ _id: req.params.id, business: req.business._id });
+  const customer = await Customer.softDeleteOne(
+    { _id: req.params.id, business: req.business._id },
+    { userId: req.user._id }
+  );
 
   if (!customer) {
     throw new ApiError(404, 'Customer not found');

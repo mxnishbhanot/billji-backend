@@ -89,7 +89,8 @@ export const customerBalanceTotals = async (businessId, customerId, { session } 
     PaymentAllocation.aggregate([
       { $match: { business: businessId, customer: customerId } },
       { $lookup: { from: 'salesdocuments', localField: 'invoice', foreignField: '_id', as: 'doc' } },
-      { $match: { 'doc.documentStatus': { $nin: ['cancelled', 'void'] } } },
+      // Same reason as above, plus deletedAt: a $lookup bypasses the tombstone hook.
+      { $match: { 'doc.documentStatus': { $nin: ['cancelled', 'void'] }, 'doc.deletedAt': null } },
       { $group: { _id: null, total: { $sum: '$amount' } } }
     ]).session(session || null),
     Payment.aggregate([

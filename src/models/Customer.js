@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { syncable } from './plugins/syncable.js';
 
 const addressSchema = new mongoose.Schema(
   {
@@ -67,6 +68,8 @@ customerSchema.pre('validate', function syncCustomerCompatibility(next) {
 
   next();
 });
+
+syncable(customerSchema);
 
 customerSchema.index({ business: 1, name: 'text', phone: 'text', email: 'text', gstNumber: 'text' });
 customerSchema.index({ business: 1, isActive: 1 });

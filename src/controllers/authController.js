@@ -11,6 +11,7 @@ import { verifyGoogleIdToken } from '../config/firebase.js';
 import { permissionsForMembership } from '../middlewares/authorization.js';
 import { logAudit } from '../services/auditService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
+import { MAX_DOCUMENT_PREFIX_LENGTH } from '../services/numberingService.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { refreshTokenExpiresAt, signAccessToken, signChallengeToken, signRefreshToken, tokenHash, verifyRefreshToken } from '../utils/jwt.js';
@@ -217,7 +218,14 @@ export const settingsRules = [
   body('pinCode').optional({ nullable: true, checkFalsy: true }).trim().matches(/^\d{6}$/).withMessage('PIN code must be 6 digits'),
   body('state').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 80 }),
   body('panNumber').optional({ nullable: true, checkFalsy: true }).trim().matches(/^[A-Z]{5}[0-9]{4}[A-Z]$/i).withMessage('Enter a valid PAN'),
-  body('invoicePrefix').optional().trim().isLength({ min: 1, max: 12 }),
+  // Capped by the GST 16-character limit on the rendered number, not by the field width.
+  // The schema still permits 12 so existing over-long prefixes keep saving; this only
+  // stops new ones being set.
+  body('invoicePrefix')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: MAX_DOCUMENT_PREFIX_LENGTH })
+    .withMessage(`Invoice prefix must be ${MAX_DOCUMENT_PREFIX_LENGTH} characters or fewer, so the full number stays within the GST 16-character limit`),
   body('reminderTemplate').optional({ nullable: true }).isString().isLength({ max: 1000 }).withMessage('Reminder message must be 1000 characters or fewer'),
   body('theme').optional().isIn(['light', 'dark']),
   body('taxSettings').optional().isObject().withMessage('taxSettings must be an object'),

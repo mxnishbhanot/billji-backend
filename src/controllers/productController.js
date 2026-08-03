@@ -136,7 +136,9 @@ export const listProducts = asyncHandler(async (req, res) => {
   };
 
   if (sort === 'top-sales') {
-    const invoiceMatch = { business: req.business._id, documentType: 'invoice', documentStatus: { $nin: ['cancelled', 'void'] } };
+    // deletedAt is spelled out because a $lookup reads the collection directly and does
+    // not go through the model's tombstone hook.
+    const invoiceMatch = { business: req.business._id, documentType: 'invoice', deletedAt: null, documentStatus: { $nin: ['cancelled', 'void'] } };
     if (from || to) {
       invoiceMatch.date = {};
       if (from) invoiceMatch.date.$gte = startOfDay(parseDateParam(from));
@@ -334,7 +336,12 @@ export const updateProduct = asyncHandler(async (req, res) => {
 });
 
 export const deleteProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findOneAndDelete({ _id: req.params.id, business: req.business._id });
+  // Tombstoned, not removed: a delta pull has to be able to tell a device the record is
+  // gone, and a physically absent row is indistinguishable from one that never synced.
+  const product = await Product.softDeleteOne(
+    { _id: req.params.id, business: req.business._id },
+    { userId: req.user._id }
+  );
 
   if (!product) {
     throw new ApiError(404, 'Product not found');

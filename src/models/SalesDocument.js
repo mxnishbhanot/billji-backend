@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { liveUniqueIndex, syncable } from './plugins/syncable.js';
 
 export const SALES_DOCUMENT_TYPES = ['quotation', 'order', 'invoice', 'delivery_challan', 'credit_note', 'refund_note'];
 export const DOCUMENT_STATUSES = ['draft', 'issued', 'cancelled', 'void'];
@@ -186,8 +187,14 @@ salesDocumentSchema.pre('validate', function syncCompatibilityFields(next) {
   next();
 });
 
-salesDocumentSchema.index({ business: 1, documentType: 1, documentNumber: 1 }, { unique: true });
-salesDocumentSchema.index({ business: 1, invoiceNumber: 1 }, { unique: true, partialFilterExpression: { invoiceNumber: { $gt: '' } } });
+// Invoice and SalesDocument are two models over this one schema object, so the plugin is
+// applied here exactly once and both inherit it.
+syncable(salesDocumentSchema);
+
+// Tombstoned documents release their number back to the series. The sequence never hands
+// the same number out twice regardless, so this only prevents a phantom collision.
+salesDocumentSchema.index({ business: 1, documentType: 1, documentNumber: 1 }, liveUniqueIndex());
+salesDocumentSchema.index({ business: 1, invoiceNumber: 1 }, liveUniqueIndex({ invoiceNumber: { $gt: '' } }));
 salesDocumentSchema.index({ business: 1, documentType: 1, date: -1 });
 salesDocumentSchema.index({ business: 1, documentStatus: 1, paymentStatus: 1 });
 salesDocumentSchema.index({ business: 1, status: 1 });

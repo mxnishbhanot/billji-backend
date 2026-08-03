@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { liveUniqueIndex, syncable } from './plugins/syncable.js';
 
 const productSchema = new mongoose.Schema(
   {
@@ -38,11 +39,14 @@ productSchema.pre('validate', function syncProductCompatibility(next) {
   next();
 });
 
+syncable(productSchema);
+
 productSchema.index({ business: 1, name: 'text', sku: 'text', category: 'text' });
-productSchema.index({ business: 1, sku: 1 }, { unique: true, partialFilterExpression: { sku: { $gt: '' } } });
-// Same shape as the sku index: unique only among products that actually have a barcode,
-// so the many products without one do not collide on empty string.
-productSchema.index({ business: 1, barcode: 1 }, { unique: true, partialFilterExpression: { barcode: { $gt: '' } } });
+// Unique only among live products that actually have a SKU: the empty-string guard keeps
+// the many products without one from colliding, and the deletedAt guard lets a deleted
+// SKU be re-used.
+productSchema.index({ business: 1, sku: 1 }, liveUniqueIndex({ sku: { $gt: '' } }));
+productSchema.index({ business: 1, barcode: 1 }, liveUniqueIndex({ barcode: { $gt: '' } }));
 productSchema.index({ business: 1, isActive: 1, trackStock: 1 });
 productSchema.index({ business: 1, trackStock: 1, stockQuantity: 1, updatedAt: -1 });
 

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { liveUniqueIndex, syncable } from './plugins/syncable.js';
 
 export const ORDER_STATUSES = ['draft', 'confirmed', 'fulfilled', 'cancelled'];
 export const ORDER_FULFILLMENT_STATUSES = ['pending', 'delivered', 'returned', 'not_applicable'];
@@ -84,12 +85,14 @@ const orderSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+syncable(orderSchema);
+
 orderSchema.index({ business: 1, orderStatus: 1, createdAt: -1 });
 orderSchema.index({ business: 1, paymentStatus: 1, date: -1 });
 orderSchema.index({ business: 1, fulfillmentStatus: 1, date: -1 });
 orderSchema.index({ business: 1, date: -1 });
 orderSchema.index({ business: 1, customer: 1, createdAt: -1 });
-orderSchema.index({ business: 1, orderNumber: 1 }, { unique: true });
+orderSchema.index({ business: 1, orderNumber: 1 }, liveUniqueIndex());
 
 const Order = mongoose.models.Order || mongoose.model('Order', orderSchema);
 

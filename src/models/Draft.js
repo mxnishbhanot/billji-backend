@@ -10,7 +10,9 @@ const draftSchema = new mongoose.Schema(
     schemaVersion: { type: Number, default: 1, min: 1 },
     payload: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
     dirty: { type: Boolean, default: false },
-    lastEditedAt: { type: Date, default: Date.now, index: true },
+    // No `index: true` here: the TTL index below is on the same key, and declaring both means
+    // whichever is built first wins — leaving the expiry silently never applied.
+    lastEditedAt: { type: Date, default: Date.now },
     lastSyncedAt: { type: Date, default: null }
   },
   { timestamps: true }

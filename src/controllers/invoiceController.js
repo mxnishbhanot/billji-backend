@@ -54,6 +54,11 @@ export const invoiceRules = [
   body('discountType').optional().isIn(['flat', 'percentage']),
   body('discountValue').optional().isFloat({ min: 0 }),
   body('allowOversell').optional().isBoolean().toBoolean(),
+  // Present only on a document a device issued offline. The value is checked against that
+  // device's numbering series in modules/sync/deviceRegistry; this is the shape check.
+  body('documentNumber').optional({ checkFalsy: true }).isString().trim().isLength({ max: 16 }),
+  body('invoiceNumber').optional({ checkFalsy: true }).isString().trim().isLength({ max: 16 }),
+  body('date').optional({ checkFalsy: true }).isISO8601(),
   body('status').optional().isIn(['pending', 'paid', 'cancelled']),
   body('notes').optional({ nullable: true }).trim().isLength({ max: 1000 })
 ];
