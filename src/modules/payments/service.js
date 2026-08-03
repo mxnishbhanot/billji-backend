@@ -237,6 +237,17 @@ export const recordCustomerPaymentWorkflow = ({ req }) =>
     const invoiceIds = Array.isArray(req.body.invoiceIds) ? req.body.invoiceIds : [];
     if (!invoiceIds.length) throw new ApiError(422, 'At least one invoice is required');
 
+    const seenInvoiceIds = new Set();
+    for (const invoiceId of invoiceIds) {
+      const key = String(invoiceId);
+      if (seenInvoiceIds.has(key)) {
+        throw new ApiError(422, 'Duplicate invoice ids are not allowed in one payment', {
+          code: 'DUPLICATE_INVOICE_IDS'
+        });
+      }
+      seenInvoiceIds.add(key);
+    }
+
     const customerId = req.params.customerId;
 
     // Load + validate every target invoice (server is source of truth for balances).

@@ -165,13 +165,15 @@ const failure = (op, error) => ({
   entity: op.entity,
   opType: op.opType,
   clientId: op.clientId ?? null,
-  // A 409 is a genuine collision (duplicate number, reused idempotency key). It is reported
-  // as such; deciding what to do about it is the client's job in a later phase.
+  // A 409 is a genuine collision (duplicate number, reused idempotency key, stale version).
+  // The client decides what to do; for VERSION_CONFLICT it needs the current record to rebase.
   status: error.statusCode === 409 ? 'conflict' : 'rejected',
   statusCode: error.statusCode || 500,
   code: error.details?.code || null,
   message: error.message,
-  details: Array.isArray(error.details) ? error.details : null
+  details: Array.isArray(error.details) ? error.details : null,
+  version: error.details?.currentVersion ?? null,
+  record: error.details?.record ?? null
 });
 
 const success = (op, record, extra = {}) => ({
@@ -205,6 +207,27 @@ const runOperation = async (req, op, permissions) => {
 
   if (definition.requiresTarget && !op.targetId) {
     throw new ApiError(422, `${op.opType} requires targetId`, { code: 'TARGET_ID_REQUIRED' });
+  }
+
+  // Optimistic concurrency. Older clients omit baseVersion and keep last-write-wins;
+  // current clients send the version their edit was based on and get a 409 on mismatch.
+  // The full record travels with the 409 so Keep Local can rebase without a separate GET.
+  if (op.opType === 'update' && op.baseVersion != null && op.targetId) {
+    const current = await definition.model.findOne({ _id: op.targetId, business: req.business._id }).lean();
+
+    if (current && current.version != null && Number(current.version) !== Number(op.baseVersion)) {
+      const record = { ...current };
+      // Same redaction as the pull projection: never hand bearer credentials to the device.
+      delete record.shareToken;
+      delete record.pdfCacheKey;
+
+      throw new ApiError(409, 'This record changed since your last edit', {
+        code: 'VERSION_CONFLICT',
+        currentVersion: current.version,
+        baseVersion: op.baseVersion,
+        record
+      });
+    }
   }
 
   // Echo matching: the device minted this id, so a create whose response was lost to a

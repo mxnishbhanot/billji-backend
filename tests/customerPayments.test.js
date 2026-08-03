@@ -169,4 +169,17 @@ describe('customer payment allocation', () => {
       .send({ amount: 500, method: 'cash', invoiceIds: [oldInvoice._id] })
       .expect(422);
   });
+
+  it('rejects duplicate invoice ids that would double-allocate and fabricate credit', async () => {
+    const { token, customer, oldInvoice } = await setupCustomerWithDues();
+
+    const res = await api()
+      .post(`/api/v1/payments/customers/${customer._id}/record`)
+      .set(authHeader(token))
+      .set(IDEMPOTENCY_HEADER, `cust-pay-dup-${customer._id}`)
+      .send({ amount: 500, method: 'cash', invoiceIds: [oldInvoice._id, oldInvoice._id] })
+      .expect(422);
+
+    assert.equal(res.body.details?.code, 'DUPLICATE_INVOICE_IDS');
+  });
 });

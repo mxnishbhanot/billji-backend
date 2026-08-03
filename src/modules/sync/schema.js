@@ -38,5 +38,7 @@ export const pushRules = [
   body('ops.*.opType').isIn(['create', 'update', 'delete']),
   body('ops.*.clientId').optional({ nullable: true }).isString().isLength({ max: 64 }),
   body('ops.*.targetId').optional({ nullable: true }).isMongoId(),
+  // Optional for backward compatibility with older clients that omit it (LWW for those).
+  body('ops.*.baseVersion').optional({ nullable: true }).isInt({ min: 1 }).toInt(),
   body('ops.*.payload').optional({ nullable: true }).isObject()
 ];

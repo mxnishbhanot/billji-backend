@@ -19,9 +19,8 @@ import { DEFAULT_REMINDER_TEMPLATE, listPendingReminders, sendReminders } from '
 import { sendInvoiceEmail } from '../services/emailService.js';
 import { buildInvoiceHtml } from '../services/invoiceHtml.js';
 import { generateInvoicePdf } from '../services/pdfService.js';
-import { getOrRenderInvoicePdf, invalidateInvoicePdf } from '../services/invoicePdfCache.js';
+import { getOrRenderInvoicePdf } from '../services/invoicePdfCache.js';
 import { DOMAIN_EVENTS, publishDomainEvent } from '../services/eventBus.js';
-import { resolveInvoiceReminderNotifications } from '../services/notificationService.js';
 import { emitBusinessEvent } from '../services/socketService.js';
 import { logAudit } from '../services/auditService.js';
 import { paginateQuery, UNPAGINATED_LIST_CAP, wantsPagination } from '../utils/pagination.js';
@@ -195,30 +194,21 @@ export const getInvoice = asyncHandler(async (req, res) => {
 export const updateInvoiceStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
 
-  if (!['pending', 'paid', 'cancelled'].includes(status)) {
+  // paid/pending must go through the payment/ledger workflows — mutating status here
+  // left invoices looking settled while Customer.outstandingDues still counted them.
+  if (status === 'paid' || status === 'pending') {
+    throw new ApiError(422, 'Record or reverse a payment to change payment status', {
+      code: 'PAYMENT_STATUS_VIA_PAYMENTS'
+    });
+  }
+
+  if (status !== 'cancelled') {
     throw new ApiError(422, 'Invalid invoice status');
   }
 
-  if (status === 'cancelled') {
-    const invoice = await cancelInvoiceWorkflow({ req });
-    void logAudit(req, { action: 'invoice.status_updated', resourceType: 'invoice', resourceId: invoice._id, metadata: { status } });
-    return res.json({ success: true, invoice: serializeInvoice(invoice, req) });
-  }
-
-  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
-  invoice.status = status;
-  invoice.paidAmount = status === 'paid' ? invoice.total : 0;
-  invoice.balanceDue = status === 'paid' ? 0 : invoice.total;
-  invoice.updatedBy = req.user._id;
-  await invoice.save();
-  void invalidateInvoicePdf(invoice);
-
-  if (status === 'paid') {
-    await resolveInvoiceReminderNotifications(req.business._id, invoice._id);
-  }
-  emitInvoiceChanges(req.business._id, 'invoice_status_updated');
+  const invoice = await cancelInvoiceWorkflow({ req });
   void logAudit(req, { action: 'invoice.status_updated', resourceType: 'invoice', resourceId: invoice._id, metadata: { status } });
-  res.json({ success: true, invoice: serializeInvoice(invoice, req) });
+  return res.json({ success: true, invoice: serializeInvoice(invoice, req) });
 });
 
 export const duplicateInvoice = asyncHandler(async (req, res) => {

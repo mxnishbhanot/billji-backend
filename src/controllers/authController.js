@@ -384,9 +384,21 @@ export const refreshSession = asyncHandler(async (req, res) => {
   if (!session) throw new ApiError(401, 'Refresh token expired or revoked');
 
   const user = await User.findById(session.user).select('-password');
-  const business = await Business.findOne({ _id: session.business, status: 'active' });
-  const membership = business ? await BusinessMember.findOne({ business: business._id, user: user?._id, status: 'active' }) : null;
-  if (!user || !business) throw new ApiError(401, 'Session user or business is no longer active');
+  if (!user) throw new ApiError(401, 'Session user or business is no longer active');
+
+  // Match protect: active workspace is user.defaultBusiness, not the business frozen at login.
+  // switchBusiness never reissues tokens, so session.business can be stale after a switch.
+  let business = user.defaultBusiness ? await Business.findOne({ _id: user.defaultBusiness, status: 'active' }) : null;
+  let membership = business
+    ? await BusinessMember.findOne({ business: business._id, user: user._id, status: 'active' })
+    : null;
+
+  if (!business || !membership) {
+    membership = await BusinessMember.findOne({ user: user._id, status: 'active' }).sort({ joinedAt: 1 });
+    business = membership ? await Business.findOne({ _id: membership.business, status: 'active' }) : null;
+  }
+
+  if (!business || !membership) throw new ApiError(401, 'Session user or business is no longer active');
 
   const refreshTokenId = crypto.randomUUID();
   const accessToken = signAccessToken({ userId: user._id, sessionId: session._id });
@@ -394,6 +406,7 @@ export const refreshSession = asyncHandler(async (req, res) => {
   session.refreshTokenId = refreshTokenId;
   session.refreshTokenHash = tokenHash(refreshToken);
   session.refreshTokenExpiresAt = refreshTokenExpiresAt();
+  session.business = business._id;
   session.lastUsedAt = new Date();
   session.userAgent = requestUserAgent(req) || session.userAgent;
   session.deviceName = requestDeviceName(req) || session.deviceName;

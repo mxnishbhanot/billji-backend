@@ -158,6 +158,44 @@ describe('POST /sync/push', () => {
     assert.equal(missing.body.results[0].statusCode, 404);
   });
 
+  it('rejects a stale baseVersion with 409 while accepting updates that omit it', async () => {
+    const { business, token } = await createTestContext();
+    const product = await createProduct(business, { name: 'Original' });
+    const currentVersion = product.version ?? 1;
+
+    const stale = await push(token, [
+      {
+        opId: 'op-product-stale-1',
+        entity: 'product',
+        opType: 'update',
+        targetId: String(product._id),
+        baseVersion: currentVersion - 1 || 999,
+        payload: { name: 'Stale', price: 10, stockQuantity: 1 }
+      }
+    ]).expect(200);
+
+    assert.equal(stale.body.results[0].status, 'conflict');
+    assert.equal(stale.body.results[0].statusCode, 409);
+    assert.equal(stale.body.results[0].code, 'VERSION_CONFLICT');
+    // Keep Local rebases from this record — without it the client retries the stale baseVersion forever.
+    assert.equal(stale.body.results[0].version, currentVersion);
+    assert.equal(stale.body.results[0].record?.name, 'Original');
+    assert.equal(String(stale.body.results[0].record?._id), String(product._id));
+
+    const legacy = await push(token, [
+      {
+        opId: 'op-product-legacy-1',
+        entity: 'product',
+        opType: 'update',
+        targetId: String(product._id),
+        payload: { name: 'Legacy LWW', price: 10, stockQuantity: 1 }
+      }
+    ]).expect(200);
+
+    assert.equal(legacy.body.results[0].status, 'ok');
+    assert.equal(legacy.body.results[0].record.name, 'Legacy LWW');
+  });
+
   it('records a payment against an invoice created earlier in the same batch cycle', async () => {
     const { business, token } = await createTestContext();
     const customer = await createCustomer(business);
