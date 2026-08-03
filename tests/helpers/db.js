@@ -17,6 +17,12 @@ export const useMongoTestDb = () => {
     });
 
     await mongoose.connect(replSet.getUri(), { dbName: `billji_test_${Date.now()}` });
+
+    // Build every index before the first write. Mongoose builds them lazily in the background,
+    // so without this a test can insert two rows that a unique index would have refused — and
+    // an assertion about uniqueness (a duplicate clientId, a reused invoice number) silently
+    // passes against a collection that has no index yet.
+    await Promise.all(Object.values(mongoose.models).map((model) => model.init()));
   });
 
   afterEach(async () => {
