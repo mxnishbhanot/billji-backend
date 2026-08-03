@@ -7,8 +7,8 @@
 > names/prices, code-config plans, no admin panel). That doc stays useful for pricing
 > rationale and India market reasoning only.
 >
-> **Phase 1 is implemented** — catalogs, models, seeders, and the snapshot/feature/limit
-> engines. See §12 for what shipped and how it deviates from this design.
+> **Phases 1 and 2 are implemented** — catalogs, models, seeders, the snapshot/feature/limit
+> engines (§12), and the read-only billing API with the stable mobile DTO (§13).
 
 ---
 
@@ -740,7 +740,7 @@ changes until Phase 5; nothing is *enforced* until Phase 6.
 |---|---|---|---|
 | **P0** | This document | Approval | — |
 | **P1** ✅ **DONE** | Catalog + models + seeding + the three engines. See §12 | Data layer + engines exist, nothing reads them | None — 418/418 tests pass |
-| **P2** | Engines. `subscriptionService`, `entitlementService`, `usageService`, `couponService`. `protect` attaches `req.subscription`. `GET /billing/{subscription,plans,usage}` read-only. `teamLimitService` delegates | Read-only truth, no blocking | Low |
+| **P2** ✅ **DONE** | Read-only API + stable DTO. `protect` attaches lazy `req.access()`, `GET /billing/{plans,subscription,usage}`, `subscription` block on auth responses, `teamLimitService` delegates. See §13 | Read-only truth, no blocking | Low — 445/445 tests pass |
 | **P3** | Provider layer + Razorpay. `payments/` registry, razorpay + manual providers, checkout/verify, raw-body webhook (§6.2), `SubscriptionPayment`, refunds, receipts. Sandbox-tested | Money can be taken | **High** — most careful phase |
 | **P4** | Guards in `warn` mode. `requireFeature`/`requireLimit` on all routes, in-controller quota checks, sync-registry `feature`/`meter` fields, `BILLING_ENFORCEMENT=warn`. Analytics on every would-be block | Full visibility, zero blocking | Medium — §1.3 is here |
 | **P5** | Mobile. `useEntitlements`, `SubscriptionScreen`, `PlansScreen`, `UpgradeSheet`, `RazorpayCheckoutSheet`, usage meters, lock badges, `402` interception, analytics | Users can see + buy plans | Medium |
@@ -883,3 +883,114 @@ Full suite: **418 tests, 418 pass** — 59 new, zero regressions.
 - `teamLimitService` still uses its own hardcoded `PLAN_LIMITS` map. Moving it onto the limit
   engine is P2 — doing it now would change live behaviour with nothing to verify against.
 - Nothing reads `platformRole`. The guard is P6.
+
+---
+
+## 13. Phase 2 — implemented
+
+Read-only billing API plus the stable mobile DTO. **No checkout, no guards, no mobile UI, no
+enforcement.** The app can now *see* its plan; nothing can block on it yet.
+
+### 13.1 The stable DTO — `src/contracts/billingDto.js`
+
+Every endpoint that reports the current subscription serialises through `subscriptionDto()`:
+`GET /billing/subscription`, `GET /billing/usage`, and the `subscription` block on
+`/auth/{login,register,me,refresh,switch-business}` and `PATCH /settings`. One shape, one place
+to change it, and a test asserts `/auth/me` and `/billing/subscription` are byte-identical.
+
+Contracted fields (a missing one is a breaking change):
+
+| Field | Meaning |
+|---|---|
+| `planId` | Durable plan identity. The only plan reference business logic may use |
+| `planName` | Display name. Editable marketing copy |
+| `planKey` | Stable slug for analytics/copy lookups. **Never** branch on it |
+| `snapshotVersion` | Plan version the entitlements were copied from — answers "what exactly did this customer buy?" |
+| `subscriptionStatus` | `trialing` \| `active` \| `in_grace` \| `past_due` \| `cancelled` \| `expired` \| `paused` \| `none` |
+| `renewalDate` | When the next payment is due. `null` for free/lifetime **or when a cancellation is pending** |
+| `expiryDate` | When access actually ends. `null` when it never does |
+| `gracePeriodEndsAt` | Last instant of access after `expiryDate` |
+| `usageSummary` | Per-limit rows: `key, label, unit, used, limit, remaining, percentUsed, unlimited, overage, resetsAt` |
+| `remainingLimits` | Flat `{ key: remaining }` for cheap lookups |
+| `features` / `limits` | Resolved entitlements (snapshot + add-on grants + overrides, already merged) |
+| `isTrial`, `trialEndsAt`, `inGracePeriod`, `cancelAtPeriodEnd`, `billingInterval` | UI state |
+| `contractVersion` | `BILLING_CONTRACT_VERSION`, currently `1` |
+
+Two conventions the DTO enforces so clients never learn an internal convention:
+
+- **`null` means unlimited.** The `-1` sentinel never crosses the wire, in any field.
+- **Money is integer paise, unformatted.** Formatting bakes currency and locale into the API.
+
+Deliberately **not** exposed, and asserted absent by a test: Mongo internals (`_id`, `__v`,
+timestamps, raw entitlement Maps), provider metadata (name, `customerId`, `subscriptionId`,
+`mandateId`, order/payment ids), `overrides` and `addOns` as separate fields (already merged — a
+client must never need to know a value came from an override), coupon internals, sales `notes`,
+`pause`, plan `meta`, and engine mechanics (`periodKey`, `limitAtTime`, `metered`).
+
+**Change rule:** fields may be added freely. Removing or repurposing one breaks every app build
+already in users' hands — bump `BILLING_CONTRACT_VERSION` and keep the old field until those
+builds are gone.
+
+### 13.2 New files
+
+| File | Role |
+|---|---|
+| `src/contracts/billingDto.js` | `subscriptionDto`, `planDto`, `BILLING_CONTRACT_VERSION` |
+| `src/modules/billing/service.js` | `currentSubscription`, `listPlans`, `liveCounts` |
+| `src/modules/billing/controller.js` | The three read endpoints |
+| `src/modules/billing/routes.js` | Mounted at `/api/v1/billing` |
+| `tests/billingApi.test.js` | 20 tests — every contracted field, no-leak assertions, date semantics, unlimited-as-null, overage, signup provisioning |
+
+### 13.3 Endpoints
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/v1/billing/subscription` | `{ success, subscription: <DTO> }` |
+| GET | `/api/v1/billing/usage` | `{ success, usage: { contractVersion, subscriptionStatus, usageSummary, remainingLimits } }` |
+| GET | `/api/v1/billing/plans` | `{ success, plans: planDto[] }` — active + **public** only; enterprise and `legacy_pro` are never listed |
+
+Guarded with `settingsView`/`settingsManage`. The dedicated `billing.view` / `billing.manage`
+permission pair is deferred to P3: there is nothing to authorise separately until something can
+be changed or charged, and adding permissions early means a re-seed plus a mobile mirror update
+for no behaviour.
+
+### 13.4 Modified files
+
+| File | Change | Compatible? |
+|---|---|---|
+| `src/middlewares/auth.js` | `protect` attaches `req.access()` — a **lazy, per-request-memoized** resolver. Not eager: most requests never look, and resolving on every one would add a query app-wide. Several guards on one route share a single fetch | Yes, additive |
+| `src/controllers/authController.js` | `publicUser()` gains `subscription: <DTO>`; register + Google signup call `ensureSubscription` | Yes, additive. Provisioning is non-fatal — a signup must never fail over billing setup |
+| `src/services/teamLimitService.js` | `canInvite` delegates to the limit engine, reading `team_members` from the snapshot (+ overrides) | See §13.5 |
+| `src/modules/billing/*`, `src/routes/index.js` | New `/billing` mount | Yes |
+| `src/constants/entitlements.js` | `legacy_pro.team_members: 1 → 2` | See §13.5 |
+
+### 13.5 The one real behaviour change, and how it is contained
+
+`teamLimitService` is the only pre-existing enforcement in the app, so moving it onto the limit
+engine changes live behaviour — before the `BILLING_ENFORCEMENT` warn-mode flip exists. Two
+guards contain it:
+
+1. **No subscription row ⇒ legacy caps.** A business that predates billing keeps the old
+   `{free:2, pro:5, business:15, enterprise:∞}` map until the P7 backfill gives it a
+   subscription. Nothing creates subscriptions for existing businesses yet, so today's users are
+   untouched. New signups get a subscription immediately and go through the engine (Starter = 1
+   seat), which is the intended behaviour for them.
+2. **`legacy_pro` grants 2 seats, not Pro's 1.** Pro is 1 seat by Decision 5, but the pre-billing
+   free cap was 2 — so backfilling a two-member business onto Pro-equivalent entitlements would
+   take a member away. Decision 2 (never silently downgrade) outranks tier symmetry. This plan is
+   grandfathering, not Pro.
+
+### 13.6 Breaking changes
+
+**None.** `subscription` is an additive field on auth responses; no existing field changed shape.
+`canInvite`'s signature and return shape are unchanged (unlimited reports as `Infinity`, which is
+what its one caller already compares numerically).
+
+Full suite: **445 tests, 445 pass** — 27 new since P1, zero regressions.
+
+### 13.7 Still not wired
+
+- **Nothing enforces anything.** `req.access()` exists and is exercised by the billing endpoints,
+  but no route guard reads it yet — that is P4, behind `BILLING_ENFORCEMENT=off|warn|on`.
+- No `couponService` (P3, with checkout), no `POST /businesses` (needs the `businesses` limit
+  guard, so P4), no mobile types or screens (P5), no admin API (P6).

@@ -320,7 +320,11 @@ export const PLAN_SEEDS = [
     visibility: 'private',
     prices: [{ interval: 'lifetime', amount: 0 }],
     features: featureMap(PRO_FEATURES),
-    limits: withLimitDefaults({ businesses: 1, team_members: 1 }),
+    // team_members is 2, not Pro's 1, on purpose: teamLimitService has always allowed a free
+    // business 2 seats, so a business already running with two members would lose one the day
+    // billing shipped. Decision 2 says never silently downgrade an existing user, and that
+    // outranks tier symmetry. This plan is grandfathering, not Pro.
+    limits: withLimitDefaults({ businesses: 1, team_members: 2 }),
     trial: { enabled: false, days: 0 },
     grace: { days: 0 },
     meta: { grandfathered: true, priceLocked: true }

@@ -11,7 +11,9 @@ import { verifyGoogleIdToken } from '../config/firebase.js';
 import { permissionsForMembership } from '../middlewares/authorization.js';
 import { logAudit } from '../services/auditService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
+import { currentSubscription } from '../modules/billing/service.js';
 import { MAX_DOCUMENT_PREFIX_LENGTH } from '../services/numberingService.js';
+import { ensureSubscription } from '../services/subscriptionService.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { refreshTokenExpiresAt, signAccessToken, signChallengeToken, signRefreshToken, tokenHash, verifyRefreshToken } from '../utils/jwt.js';
@@ -56,12 +58,23 @@ const publicUser = async (user, business, membership = null) => ({
   roleKey: membership?.roleKey || 'owner',
   permissions: await permissionsForMembership(membership || { roleKey: 'owner' }),
   businessProfile: businessProfile(business),
+  // Same DTO as GET /billing/subscription, so the client has one shape and can gate UI offline
+  // from the persisted auth payload. Additive — no existing field changed.
+  subscription: business ? await currentSubscription({ user, business }) : null,
   createdAt: user.createdAt
 });
 
 // Max concurrent active sessions (logged-in devices) per user. On a new login
 // beyond this, the oldest sessions are revoked so only the freshest 3 survive.
 const MAX_ACTIVE_SESSIONS = 3;
+
+// Puts a brand-new business on the default plan. Never fatal: a signup must not fail because the
+// billing catalog has not been seeded, and resolveAccess() already falls back to the default plan
+// for a business with no subscription row, so the worst case is a row the P7 backfill creates later.
+const provisionSubscription = (business) =>
+  ensureSubscription({ business, actor: { type: 'system', note: 'signup' } }).catch((error) => {
+    console.error('[billing] could not provision a subscription at signup:', error.message);
+  });
 
 const requestIp = (req) => req.ip || req.headers['x-forwarded-for']?.split(',')?.[0]?.trim() || '';
 const requestUserAgent = (req) => req.get('user-agent') || '';
@@ -268,6 +281,7 @@ export const register = asyncHandler(async (req, res) => {
   });
   user.defaultBusiness = business._id;
   await user.save();
+  await provisionSubscription(business);
 
   const session = await sessionResponse({ req, user, business });
   void logAudit(req, { action: 'auth.registered', resourceType: 'user', resourceId: user._id });
@@ -320,6 +334,7 @@ export const googleSignIn = asyncHandler(async (req, res) => {
     });
     user.defaultBusiness = business._id;
     await user.save();
+    await provisionSubscription(business);
     isNewUser = true;
   }
 
