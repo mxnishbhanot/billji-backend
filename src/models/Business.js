@@ -45,10 +45,20 @@ const businessSchema = new mongoose.Schema(
     // {name} {invoice} {amount} {link} {business} {days}.
     reminderTemplate: { type: String, default: '', trim: true, maxlength: 1000 },
     theme: { type: String, enum: ['light', 'dark'], default: 'light' },
-    // Subscription plan. maxMembers null => derive from the plan key in TeamLimitService;
-    // set it to override for a specific business. Billing/plan-change wiring comes later.
+    // DENORMALIZED MIRROR of the Subscription document — read-only, written only by
+    // subscriptionService.syncBusinessMirror(). The Subscription (and its entitlement snapshot)
+    // is the source of truth for every access decision; this block exists so legacy readers
+    // (teamLimitService, older mobile builds) keep working and so admin list queries can filter
+    // by plan without a join.
+    //
+    // The enum is gone deliberately: plans are admin-created rows, so no fixed list of keys can
+    // be correct. Dropping it is backward-compatible — Mongoose only validates on write.
     plan: {
-      key: { type: String, enum: ['free', 'pro', 'business', 'enterprise'], default: 'free' },
+      key: { type: String, default: 'free', trim: true, lowercase: true, maxlength: 60 },
+      subscriptionStatus: { type: String, default: '', trim: true, maxlength: 30 },
+      updatedAt: { type: Date, default: null },
+      // @deprecated Use Subscription.overrides.limits.team_members. Existing values are migrated
+      // in P7; teamLimitService still reads this until it moves onto the limit engine in P2.
       maxMembers: { type: Number, default: null }
     },
     status: { type: String, enum: ['active', 'suspended'], default: 'active', index: true }

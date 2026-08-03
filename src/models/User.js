@@ -34,6 +34,12 @@ const userSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
     password: { type: String, required: true, minlength: 8, select: false },
     defaultBusiness: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', default: null, index: true },
+    // BillJi-staff access, a different axis from the per-business RBAC in BusinessMember/Role:
+    // this grants nothing inside any business, only on the platform admin API (plans, coupons,
+    // refunds). Deliberately a coarse field rather than a second permission system — promote a
+    // user with a one-off script, never through an API. Schema only in this phase; the
+    // requirePlatformAdmin guard and admin routes land in P6.
+    platformRole: { type: String, enum: ['none', 'support', 'admin'], default: 'none', index: true },
     twoFactor: { type: twoFactorSchema, default: () => ({}) }
   },
   { timestamps: true }
