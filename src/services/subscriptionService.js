@@ -3,6 +3,7 @@ import Plan from '../models/Plan.js';
 import Subscription from '../models/Subscription.js';
 import SubscriptionHistory from '../models/SubscriptionHistory.js';
 import { DEFAULT_PLAN_KEY } from '../constants/entitlements.js';
+import { ApiError } from '../utils/ApiError.js';
 import { getDefaultPlan, planEntitlements, resolveEntitlements } from './entitlementService.js';
 
 // SUBSCRIPTION SNAPSHOT ENGINE.
@@ -184,11 +185,16 @@ export const applyPlan = async ({
   const effectiveInterval = interval || price?.interval || 'free';
   const snapshot = buildSnapshot(plan);
 
+  // A renewal extends from the end of the period already paid for, not from today: a customer who
+  // renews three days early must not lose those three days. Every other transition (activation,
+  // upgrade, downgrade, admin assignment) starts a fresh period now.
+  const stillRunning = existing?.currentPeriodEnd && existing.currentPeriodEnd > now;
+  const extendFrom = action === 'renewed' && stillRunning ? existing.currentPeriodEnd : now;
   const periodStart = now;
   const periodEnd =
     explicitPeriodEnd !== undefined
       ? explicitPeriodEnd
-      : periodEndFor({ interval: effectiveInterval, intervalCount: price?.intervalCount || 1, from: periodStart });
+      : periodEndFor({ interval: effectiveInterval, intervalCount: price?.intervalCount || 1, from: extendFrom });
   const graceDays = plan.grace?.days || 0;
   const graceEndsAt = periodEnd && graceDays > 0 ? new Date(periodEnd.getTime() + graceDays * DAY_MS) : periodEnd;
 
@@ -264,6 +270,149 @@ export const ensureSubscription = async ({ business, planKey = null, actor = { t
   if (!plan) throw new Error(`Cannot create a subscription: no plan found (${planKey || 'default'}). Run the billing seeder.`);
 
   return applyPlan({ business: businessId, plan, action: 'created', actor, now });
+};
+
+/**
+ * Starts a no-card trial on a plan.
+ *
+ * A trial is a snapshot like any other — the trialling business genuinely holds the paid plan's
+ * entitlements — with an end date and a one-shot `trial.used` latch. Once per business, ever: the
+ * latch is on the subscription, so switching plans does not hand out a second trial.
+ */
+export const startTrial = async ({ business, plan, actor = { type: 'user' }, extraMs = 0, now = new Date() }) => {
+  const businessId = business?._id || business;
+  if (!plan?.trial?.enabled || !(plan.trial.days > 0)) {
+    throw new ApiError(400, 'That plan does not offer a trial', { code: 'TRIAL_NOT_AVAILABLE' });
+  }
+
+  const existing = await getSubscription(businessId);
+  if (existing?.trial?.used) {
+    throw new ApiError(409, 'This business has already used its trial', { code: 'TRIAL_ALREADY_USED' });
+  }
+  if (existing && ['active', 'in_grace'].includes(resolveStatus(existing, now)) && existing.currentPeriodEnd) {
+    throw new ApiError(409, 'You already have a paid subscription', { code: 'SUBSCRIPTION_ALREADY_PAID' });
+  }
+
+  const endsAt = new Date(now.getTime() + plan.trial.days * DAY_MS + extraMs);
+  const snapshot = buildSnapshot(plan);
+  const before = existing ? { planKey: existing.planKey, status: resolveStatus(existing, now), snapshot: existing.entitlements } : null;
+
+  const subscription = await Subscription.findOneAndUpdate(
+    { business: businessId },
+    {
+      $set: {
+        plan: plan._id,
+        planKey: plan.key,
+        planVersion: plan.version || 1,
+        status: 'trialing',
+        billingInterval: 'free',
+        entitlements: snapshot,
+        currentPeriodStart: now,
+        // A trial's expiry lives in trial.endsAt; currentPeriodEnd stays null so that nothing
+        // mistakes an unpaid trial for a paid period.
+        currentPeriodEnd: null,
+        graceEndsAt: null,
+        trial: { used: true, startedAt: now, endsAt, planKey: plan.key },
+        'pricing.amount': 0,
+        'cancel.requestedAt': null,
+        'cancel.effectiveAt': null
+      },
+      $setOnInsert: { business: businessId }
+    },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
+
+  await syncBusinessMirror(subscription, 'trialing');
+  await recordHistory({
+    business: businessId,
+    subscription: subscription._id,
+    action: 'trial_started',
+    fromPlanKey: before?.planKey || '',
+    toPlanKey: plan.key,
+    fromStatus: before?.status || '',
+    toStatus: 'trialing',
+    effectiveAt: now,
+    snapshotBefore: before?.snapshot || null,
+    snapshotAfter: snapshot,
+    actor,
+    metadata: { trialDays: plan.trial.days, endsAt }
+  });
+
+  return subscription;
+};
+
+/**
+ * Cancels. By default access continues to the end of the period already paid for — taking it away
+ * the moment someone clicks cancel would be keeping money for time not served.
+ */
+export const cancelSubscription = async ({ business, reason = '', immediate = false, actor = { type: 'user' }, now = new Date() }) => {
+  const businessId = business?._id || business;
+  const subscription = await getSubscription(businessId);
+  if (!subscription) throw new ApiError(404, 'No subscription to cancel', { code: 'SUBSCRIPTION_NOT_FOUND' });
+
+  const status = resolveStatus(subscription, now);
+  if (['cancelled', 'expired'].includes(status)) {
+    throw new ApiError(409, 'This subscription is already cancelled', { code: 'SUBSCRIPTION_ALREADY_CANCELLED' });
+  }
+
+  // Nothing paid for (free plan or trial) has no remaining period to honour, so it ends now.
+  const paidUntil = subscription.currentPeriodEnd;
+  const effectiveAt = immediate || !paidUntil || paidUntil <= now ? now : paidUntil;
+
+  subscription.cancel = { requestedAt: now, effectiveAt, atPeriodEnd: !immediate && effectiveAt > now, reason: String(reason).slice(0, 500) };
+  await subscription.save();
+
+  const toStatus = resolveStatus(subscription, now);
+  await syncBusinessMirror(subscription, toStatus);
+  await recordHistory({
+    business: businessId,
+    subscription: subscription._id,
+    action: 'cancelled',
+    fromPlanKey: subscription.planKey,
+    toPlanKey: subscription.planKey,
+    fromStatus: status,
+    toStatus,
+    effectiveAt,
+    snapshotBefore: subscription.entitlements,
+    snapshotAfter: subscription.entitlements,
+    actor,
+    metadata: { immediate, reason: String(reason).slice(0, 500) }
+  });
+
+  return subscription;
+};
+
+/** Undoes a cancellation that has not taken effect yet. Past that point it is a new purchase. */
+export const reactivateSubscription = async ({ business, actor = { type: 'user' }, now = new Date() }) => {
+  const businessId = business?._id || business;
+  const subscription = await getSubscription(businessId);
+  if (!subscription?.cancel?.effectiveAt) {
+    throw new ApiError(409, 'This subscription is not scheduled to cancel', { code: 'SUBSCRIPTION_NOT_CANCELLING' });
+  }
+  if (subscription.cancel.effectiveAt <= now) {
+    throw new ApiError(409, 'This subscription has already ended. Choose a plan to start again.', {
+      code: 'SUBSCRIPTION_ALREADY_ENDED'
+    });
+  }
+
+  const fromStatus = resolveStatus(subscription, now);
+  subscription.cancel = { requestedAt: null, effectiveAt: null, atPeriodEnd: true, reason: '' };
+  await subscription.save();
+
+  await syncBusinessMirror(subscription, resolveStatus(subscription, now));
+  await recordHistory({
+    business: businessId,
+    subscription: subscription._id,
+    action: 'reactivated',
+    fromPlanKey: subscription.planKey,
+    toPlanKey: subscription.planKey,
+    fromStatus,
+    toStatus: resolveStatus(subscription, now),
+    effectiveAt: now,
+    actor
+  });
+
+  return subscription;
 };
 
 /**

@@ -96,6 +96,37 @@ export const subscriptionDto = ({ access, usage = [], plan = null }) => {
   };
 };
 
+/**
+ * One row of payment history.
+ *
+ * Amounts in integer paise, same as everywhere else. `providerRefs.signature`, the raw provider
+ * payload and internal failure detail are omitted: a client needs to render a receipt line, not to
+ * reconcile with Razorpay.
+ */
+export const paymentDto = (payment) => ({
+  id: String(payment._id),
+  kind: payment.kind,
+  status: payment.status,
+  amount: payment.amount,
+  discount: payment.discount,
+  netAmount: payment.netAmount,
+  currency: payment.currency,
+  planKey: payment.planKey,
+  billingInterval: payment.billingInterval,
+  periodStart: iso(payment.periodStart),
+  periodEnd: iso(payment.periodEnd),
+  couponCode: payment.couponCode || '',
+  refundedAmount: payment.refundedAmount || 0,
+  refundedAt: iso(payment.refundedAt),
+  receiptNumber: payment.receipt?.number || '',
+  // Which processor took it, for the customer's own records. No provider ids.
+  method: payment.provider,
+  // Only while the payment is still standing. Once refunded, `updatedAt` is the refund's timestamp,
+  // not the payment's — reporting that as "paid at" would be a wrong date on a receipt.
+  paidAt: iso(payment.status === 'captured' ? payment.updatedAt : null),
+  createdAt: iso(payment.createdAt)
+});
+
 /** Limits with the -1 sentinel translated to null, so clients only ever see one "no ceiling". */
 const publicLimits = (limits = {}) =>
   Object.fromEntries(Object.entries(limits || {}).map(([key, value]) => [key, isUnlimited(value) ? null : value]));

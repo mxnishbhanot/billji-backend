@@ -37,6 +37,18 @@ export const authLimiter = rateLimit({
   }
 });
 
+// Webhooks get their own bucket, keyed by IP only (a provider carries no session). A retry storm
+// from Razorpay is legitimate traffic that must not consume the app's shared budget and lock real
+// users out — and conversely a flood of forged deliveries must not be free.
+export const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  skip: skipInTest,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { success: false, message: 'Webhook rate limit reached' }
+});
+
 export const syncLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 900,

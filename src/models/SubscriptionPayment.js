@@ -49,9 +49,16 @@ const subscriptionPaymentSchema = new mongoose.Schema(
       invoiceId: { type: String, default: '', trim: true, maxlength: 160 },
       refundId: { type: String, default: '', trim: true, maxlength: 160 }
     },
-    // Webhook dedup key. The unique index below is what makes redelivery a no-op rather than a
-    // double activation.
-    webhookEventId: { type: String, default: '', trim: true, maxlength: 160 },
+    /**
+     * Every provider event id this payment has already applied — the webhook dedup ledger.
+     *
+     * An array, not a single field: one payment legitimately receives several distinct events
+     * (`payment.captured`, then `refund.processed`), so a scalar would be overwritten and a
+     * redelivered capture could activate twice. The handler pushes with a
+     * `{ webhookEventIds: { $ne: eventId } }` guard, so a duplicate delivery matches nothing and
+     * becomes a no-op in one atomic operation — no separate event collection needed.
+     */
+    webhookEventIds: { type: [String], default: [] },
 
     failureReason: { type: String, default: '', trim: true, maxlength: 500 },
     refundedAmount: paise,
@@ -79,7 +86,9 @@ const setProviderRef = (field) =>
 
 setProviderRef('providerRefs.orderId');
 setProviderRef('providerRefs.paymentId');
-setProviderRef('webhookEventId');
+// Not unique: the dedup guard is the `$ne` predicate on the update, and this index is what makes
+// that predicate (and support lookups by event id) fast.
+subscriptionPaymentSchema.index({ webhookEventIds: 1 });
 
 const SubscriptionPayment = mongoose.model('SubscriptionPayment', subscriptionPaymentSchema);
 

@@ -7,8 +7,9 @@
 > names/prices, code-config plans, no admin panel). That doc stays useful for pricing
 > rationale and India market reasoning only.
 >
-> **Phases 1 and 2 are implemented** — catalogs, models, seeders, the snapshot/feature/limit
-> engines (§12), and the read-only billing API with the stable mobile DTO (§13).
+> **Phases 1-3 are implemented** — catalogs, models, seeders, the snapshot/feature/limit engines
+> (§12), the read-only billing API with the stable mobile DTO (§13), and the payment provider
+> layer with Razorpay checkout, verification, webhooks and refunds (§14).
 
 ---
 
@@ -741,7 +742,7 @@ changes until Phase 5; nothing is *enforced* until Phase 6.
 | **P0** | This document | Approval | — |
 | **P1** ✅ **DONE** | Catalog + models + seeding + the three engines. See §12 | Data layer + engines exist, nothing reads them | None — 418/418 tests pass |
 | **P2** ✅ **DONE** | Read-only API + stable DTO. `protect` attaches lazy `req.access()`, `GET /billing/{plans,subscription,usage}`, `subscription` block on auth responses, `teamLimitService` delegates. See §13 | Read-only truth, no blocking | Low — 445/445 tests pass |
-| **P3** | Provider layer + Razorpay. `payments/` registry, razorpay + manual providers, checkout/verify, raw-body webhook (§6.2), `SubscriptionPayment`, refunds, receipts. Sandbox-tested | Money can be taken | **High** — most careful phase |
+| **P3** ✅ **DONE** | Provider layer + Razorpay. `payments/` registry, razorpay + manual providers, checkout/verify, raw-body webhook (§6.2), refunds, coupons, trial/cancel/reactivate, receipt numbering. See §14 | Money can be taken | **High** — 532/532 tests pass; needs a sandbox smoke test before production |
 | **P4** | Guards in `warn` mode. `requireFeature`/`requireLimit` on all routes, in-controller quota checks, sync-registry `feature`/`meter` fields, `BILLING_ENFORCEMENT=warn`. Analytics on every would-be block | Full visibility, zero blocking | Medium — §1.3 is here |
 | **P5** | Mobile. `useEntitlements`, `SubscriptionScreen`, `PlansScreen`, `UpgradeSheet`, `RazorpayCheckoutSheet`, usage meters, lock badges, `402` interception, analytics | Users can see + buy plans | Medium |
 | **P6** | Admin API. `platformRole`, `requirePlatformAdmin`, plan/subscription/coupon/payment/metrics endpoints | Plans manageable without deploys | Low |
@@ -994,3 +995,170 @@ Full suite: **445 tests, 445 pass** — 27 new since P1, zero regressions.
   but no route guard reads it yet — that is P4, behind `BILLING_ENFORCEMENT=off|warn|on`.
 - No `couponService` (P3, with checkout), no `POST /businesses` (needs the `businesses` limit
   guard, so P4), no mobile types or screens (P5), no admin API (P6).
+
+---
+
+## 14. Phase 3 — implemented
+
+Money can now be taken. **No guards, no mobile UI, no admin API** — nothing is enforced yet.
+
+### 14.1 Provider layer
+
+`src/services/payments/` — the only place in the codebase that knows a processor exists. Nothing in
+`subscriptionService`, `entitlementService` or `usageService` imports a provider, so adding Stripe
+changes no business logic.
+
+Interface: `name`, `isConfigured()`, `publicConfig()`, `createOrder()`, `verifyPaymentSignature()`,
+`fetchPayment()`, `refund()`, `parseWebhook()`. Deliberately **not** in it: anything about plans,
+periods, entitlements, trials or renewals. A provider confirms money moved; that is the whole job.
+
+| File | Role |
+|---|---|
+| `payments/index.js` | Registry. `getProvider()` throws **503** when credentials are missing — a half-configured processor must never fall through to a free activation |
+| `payments/razorpayProvider.js` | Razorpay over its REST API |
+| `payments/manualProvider.js` | Bank transfer / UPI collect / enterprise invoice. Mints a reference, sits `created`, a human marks it captured |
+
+**No `razorpay` SDK dependency.** The whole surface we need is four REST calls and one HMAC; the SDK
+is a thin wrapper over exactly those, and a money path is easier to audit when the wire format is
+visible in the file. `manualProvider` exists now rather than "later" because an abstraction with one
+implementation is a guess, not an abstraction — and Enterprise (NEFT against an invoice) needs it.
+
+### 14.2 Checkout, and why the order of writes matters
+
+`src/services/billingService.js` — the only module that talks to a provider.
+
+**Our payment row is written before the provider is called.** Reversed, a failed write would leave
+an order at Razorpay that BillJi has no record of, and money could be taken against something we
+cannot match to a business. The failure mode we chose instead is an abandoned `created` row, which
+is inert and hidden from payment history.
+
+`POST /billing/checkout` runs under the existing `idempotency()` middleware: a double tap on
+"Upgrade", or a retry over a flaky mobile connection, replays the first order rather than opening a
+second one the customer could pay twice.
+
+**Two independent checks before anything is granted** on the client-confirm path:
+
+1. the HMAC over `order_id|payment_id` proves Razorpay produced the pair, and
+2. a re-fetch of the payment proves it is actually `captured` **for the amount we asked**.
+
+The signature alone would let a client replay a genuine pair from a different, unfinished attempt.
+Amount, plan, period and entitlements always come from our own row — never from the client, never
+from the event body. A test asserts that a lying event cannot change the price.
+
+### 14.3 Activation is idempotent by construction
+
+Both the client verify path and the webhook call `activateFromPayment()`, whose first act is an
+atomic `status: created|authorized → captured` claim. Exactly one caller wins; the loser returns the
+already-active subscription instead of extending the period again. Tested by firing both
+concurrently and asserting exactly one activation row in `SubscriptionHistory`.
+
+If money is captured but the plan row has since vanished, the payment stays `captured` and is
+flagged for support. **Never roll back a real charge** to keep our own data tidy.
+
+### 14.4 Webhooks — the section 6.2 trap, closed
+
+Mounted in `app.js` **before** the global `express.json()`, with `express.raw({type:'*/*'})`. The
+HMAC covers the exact bytes Razorpay sent; a parsed-and-restringified body cannot verify, and the
+only ways out of that would be to reject every webhook or to stop checking signatures.
+`tests/billingWebhook.test.js` posts a body whose spacing and key order `JSON.stringify` would not
+reproduce — **if the mount ever regresses below the JSON parser, that test fails.**
+
+Response policy: **400** only for a bad signature (do not retry a forgery). **200** for unhandled
+event types and for signed events matching no payment — retrying will not make an unknown event
+known. **5xx** only when applying a genuine event failed on our side, which is the one case that
+should be retried.
+
+**Dedup:** `SubscriptionPayment.webhookEventId` (scalar) became `webhookEventIds: [String]`.
+A deviation from section 3.5, and a necessary one: one payment legitimately receives several
+distinct events (`payment.captured`, later `refund.processed`), so a scalar would be overwritten and
+a redelivered capture could activate twice. A guarded `{ webhookEventIds: { $ne: eventId } }` update
+dedups every event type atomically, with no separate event collection. Tested.
+
+Also verified: a signature made with the **API** secret instead of the **webhook** secret is
+rejected — otherwise anyone holding the API key could forge activations. Production env now refuses
+to boot half-configured (a Razorpay key without a webhook secret).
+
+### 14.5 Coupons, trial, cancel, refunds
+
+- **Coupons** — `couponService`. One validator answers both "is this code good?" (dry run) and
+  "charge this amount", so a preview and a checkout cannot disagree. Redemption claims a slot with a
+  guarded `$inc`, so a viral code cannot exceed its cap under concurrency (tested with 10 concurrent
+  redemptions against a cap of 3). A discount never exceeds the price. A bad code is reported, never
+  silently charged at full price. Redeemed **on capture**, released on full refund.
+- **Trial** — a snapshot like any other, with an end date and a one-shot `trial.used` latch on the
+  subscription, so switching plans cannot yield a second trial. Expiry falls back to Starter.
+- **Cancel** — access continues to the end of the period already paid for; taking it away on click
+  would be keeping money for time not served. `immediate` is rejected for customers (support only).
+- **Refunds** — a full refund ends the period (a refund that leaves the plan running is a free
+  plan); a partial one does not. A refund of an *older* payment cannot revoke a newer paid period.
+  Reachable from the service and from a dashboard-issued refund arriving as a webhook; the customer
+  route is P6 admin.
+- **Proration** — an upgrade credits the unused part of the current period, or nobody upgrades
+  mid-cycle. Renewals get no credit (they already extend from the period end, so crediting would pay
+  twice for the same days). `ponytail:` straight-line, credit-only, no carry-forward.
+
+### 14.6 Receipts — number now, document later
+
+`nextReceiptNumber()` allocates `BILLJI/<FY>/000123` on the Indian financial year, so the series is
+continuous from the first rupee.
+
+**A number, not a GST tax invoice.** Issuing one needs BillJi's own GSTIN, the SAC code for the
+service, and a place-of-supply rule to pick IGST vs CGST+SGST from the customer's state — product
+and compliance decisions, not engineering ones. Rendering the PDF is a day's work once those three
+answers exist; inventing them would produce a tax document that is wrong. **Open item.**
+
+### 14.7 New endpoints
+
+| Method | Path | Guard |
+|---|---|---|
+| POST | `/billing/checkout` | `billing.manage` + idempotency |
+| POST | `/billing/checkout/verify` | `billing.manage` |
+| POST | `/billing/coupons/preview` | `billing.view` |
+| POST | `/billing/trial` | `billing.manage` |
+| POST | `/billing/cancel` | `billing.manage` |
+| POST | `/billing/reactivate` | `billing.manage` |
+| GET | `/billing/payments` | `billing.view` |
+| POST | `/billing/webhooks/:provider` | HMAC signature (no session) |
+
+New permissions `billing.view` / `billing.manage`, seeded by the existing idempotent
+`bootstrapRbac`. Separate from `settings.manage` on purpose: editing an invoice template and
+spending the owner's money are not the same trust level. Accountant and viewer get `view`;
+owner/admin get both automatically (they hold every permission).
+
+### 14.8 Files
+
+**New (8):** `services/payments/{index,razorpayProvider,manualProvider}.js`,
+`services/billingService.js`, `services/couponService.js`,
+`modules/billing/{checkoutController,webhookController,webhookRoutes}.js`
+
+**Tests (4):** `tests/helpers/razorpayStub.js` (a fetch-level fake — stubbing the HTTP boundary
+exercises URL, auth, body shape, error mapping and the real HMAC code paths; stubbing the provider
+module would test only the double), `tests/billingCheckout.test.js` (44),
+`tests/billingWebhook.test.js` (22), `tests/paymentProviders.test.js` (18)
+
+**Modified (8):** `app.js` (raw-body webhook mount ahead of the JSON parser), `config/env.js`
+(razorpay block + half-configured production guard), `constants/permissions.js` +
+`middlewares/authorization.js` (billing permissions), `middlewares/rateLimit.js` (`webhookLimiter`,
+IP-keyed — a provider retry storm must not consume the app's shared budget),
+`models/SubscriptionPayment.js` (`webhookEventIds`), `services/subscriptionService.js`
+(`startTrial`, `cancelSubscription`, `reactivateSubscription`; renewals extend from the existing
+period end so renewing early loses no days), `contracts/billingDto.js` (`paymentDto`),
+`modules/billing/routes.js`
+
+### 14.9 Breaking changes
+
+**None for clients.** All new endpoints; `paymentDto` is a new shape. One internal schema change —
+`webhookEventId` to `webhookEventIds` on `SubscriptionPayment` — with no production rows to migrate,
+since P1/P2 shipped without a payment path.
+
+Full suite: **532 tests, 532 pass** — 87 new since P2, zero regressions.
+
+### 14.10 Before production
+
+1. **Sandbox smoke test.** Every test here runs against a fetch-level fake. The real Razorpay
+   sandbox must be exercised once end to end — order, checkout, capture, a real signed webhook
+   delivery, a refund — before a rupee moves. A fake cannot catch a field Razorpay renamed.
+2. **Set `RAZORPAY_WEBHOOK_SECRET`** and subscribe the endpoint to `payment.captured`,
+   `payment.failed`, `order.paid`, `refund.created`, `refund.processed`.
+3. **The GST receipt decisions in 14.6.**
+4. **Google Play Billing (6.4)** still blocks P5 shipping, not P4 building.

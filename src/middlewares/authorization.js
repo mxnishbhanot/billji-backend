@@ -27,6 +27,8 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.purchasesView,
     PERMISSIONS.purchasesManage,
     PERMISSIONS.reportsView,
+    // Sees what the business is paying and can pull invoices; cannot change the plan.
+    PERMISSIONS.billingView,
     PERMISSIONS.notificationsView,
     PERMISSIONS.notificationsManage
   ],
@@ -50,6 +52,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.expensesView,
     PERMISSIONS.purchasesView,
     PERMISSIONS.reportsView,
+    PERMISSIONS.billingView,
     PERMISSIONS.notificationsView,
     PERMISSIONS.settingsView
   ]
