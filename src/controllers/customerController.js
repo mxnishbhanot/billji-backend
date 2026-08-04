@@ -53,6 +53,43 @@ export const customerQueryRules = [
 
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
+/** Last 10 digits — matches mobile normalizePhone so "+91 98765 43210" and "9876543210" collide. */
+const normalizePhoneDigits = (phone = '') => {
+  const digits = String(phone).replace(/\D/g, '');
+  if (!digits) return '';
+  return digits.length > 10 ? digits.slice(-10) : digits;
+};
+
+const assertPhoneAvailable = async (businessId, phone, excludeId = null) => {
+  const normalized = normalizePhoneDigits(phone);
+  if (!normalized) return;
+
+  const filter = { business: businessId, deletedAt: null };
+  if (excludeId) filter._id = { $ne: excludeId };
+
+  const exact = await Customer.findOne({ ...filter, phone: String(phone).trim() }).select('_id name phone');
+  if (exact) {
+    throw new ApiError(409, 'A customer with this phone already exists', {
+      code: 'CUSTOMER_PHONE_EXISTS',
+      customerId: exact._id
+    });
+  }
+
+  // Catch alternate formatting of the same number (spaces, +91, leading 0).
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const sibling = await Customer.findOne({
+    ...filter,
+    phone: { $regex: `${escaped}$` }
+  }).select('_id name phone');
+
+  if (sibling && normalizePhoneDigits(sibling.phone) === normalized) {
+    throw new ApiError(409, 'A customer with this phone already exists', {
+      code: 'CUSTOMER_PHONE_EXISTS',
+      customerId: sibling._id
+    });
+  }
+};
+
 const compactAddress = (address = {}) => ({
   line1: address.line1 || '',
   line2: address.line2 || '',
@@ -164,6 +201,8 @@ const emitCustomerChanges = (businessId, reason) => {
 };
 
 export const createCustomer = asyncHandler(async (req, res) => {
+  await assertPhoneAvailable(req.business._id, req.body.phone);
+
   const customer = await Customer.create({
     ...customerPayload(req.body),
     business: req.business._id,
@@ -189,6 +228,10 @@ export const createCustomer = asyncHandler(async (req, res) => {
 });
 
 export const updateCustomer = asyncHandler(async (req, res) => {
+  if (hasOwn(req.body, 'phone')) {
+    await assertPhoneAvailable(req.business._id, req.body.phone, req.params.id);
+  }
+
   const customer = await Customer.findOneAndUpdate({ _id: req.params.id, business: req.business._id }, { ...customerPayload(req.body), updatedBy: req.user._id }, {
     new: true,
     runValidators: true
@@ -204,7 +247,10 @@ export const updateCustomer = asyncHandler(async (req, res) => {
 });
 
 export const deleteCustomer = asyncHandler(async (req, res) => {
-  const customer = await Customer.findOneAndDelete({ _id: req.params.id, business: req.business._id });
+  const customer = await Customer.softDeleteOne(
+    { _id: req.params.id, business: req.business._id },
+    { userId: req.user._id }
+  );
 
   if (!customer) {
     throw new ApiError(404, 'Customer not found');

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { liveUniqueIndex, syncable } from './plugins/syncable.js';
 
 export const PURCHASE_STATUSES = ['received', 'cancelled'];
 export const PURCHASE_PAYMENT_STATUSES = ['unpaid', 'partial', 'paid'];
@@ -75,7 +76,9 @@ const purchaseBillSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-purchaseBillSchema.index({ business: 1, billNumber: 1 }, { unique: true });
+syncable(purchaseBillSchema);
+
+purchaseBillSchema.index({ business: 1, billNumber: 1 }, liveUniqueIndex());
 purchaseBillSchema.index({ business: 1, date: -1 });
 purchaseBillSchema.index({ business: 1, vendor: 1, date: -1 });
 purchaseBillSchema.index({ business: 1, status: 1, paymentStatus: 1, date: -1 });

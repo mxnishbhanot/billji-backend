@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { syncable } from './plugins/syncable.js';
 
 // The supplier side of Customer. Deliberately thinner: no shipping address, no contact
 // list, no credit balance — a shop needs to know who it buys from and what it still owes.
@@ -22,6 +23,8 @@ const vendorSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+syncable(vendorSchema);
 
 vendorSchema.index({ business: 1, name: 'text', phone: 'text', gstNumber: 'text' });
 vendorSchema.index({ business: 1, isActive: 1, name: 1 });

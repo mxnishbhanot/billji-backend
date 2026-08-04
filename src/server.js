@@ -1,5 +1,6 @@
 import http from 'http';
 import app from './app.js';
+import { bootstrapBilling } from './bootstrap/billing.js';
 import { registerScheduledJobs } from './bootstrap/jobs.js';
 import { bootstrapRbac } from './bootstrap/rbac.js';
 import { connectDB } from './config/db.js';
@@ -13,6 +14,7 @@ const startServer = async () => {
   try {
     await connectDB();
     await bootstrapRbac();
+    await bootstrapBilling();
     const server = http.createServer(app);
     initSocket(server);
     startOutboxDispatcher();

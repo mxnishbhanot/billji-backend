@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { PAYMENT_METHODS } from './Payment.js';
+import { syncable } from './plugins/syncable.js';
 
 // Money going out. Deliberately flat: a vendor here is free text, not a Vendor record,
 // and there are no line items — a shop owner logging rent or transport should not have to
@@ -42,6 +43,12 @@ const expenseSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// voidedAt and deletedAt are different things: voiding is the accounting act (the expense
+// happened and was reversed, and the reversing ledger entries still point at it),
+// deletedAt is the sync tombstone. Nothing sets deletedAt today; the protocol needs the
+// column to exist so a future delete can travel in a delta stream.
+syncable(expenseSchema);
 
 expenseSchema.index({ business: 1, date: -1 });
 expenseSchema.index({ business: 1, category: 1, date: -1 });

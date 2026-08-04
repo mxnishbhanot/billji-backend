@@ -233,7 +233,7 @@ export const deleteInvoiceWorkflow = ({ req }) =>
     // No stock movements / ledger entries exist (guard above), so nothing to
     // reverse — just remove the record and refresh derived balances.
     await publishInvoiceCancelledEvent(req, invoice, { session, suffix: 'deleted' });
-    await deleteInvoiceRecord(invoice, { session });
+    await deleteInvoiceRecord(invoice, { userId: req.user._id, session });
     await refreshCustomerBalanceForInvoice(req, invoice, { session });
 
     // Document gone — purge any cached PDF.

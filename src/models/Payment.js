@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { syncable } from './plugins/syncable.js';
 
 export const PAYMENT_METHODS = ['cash', 'upi', 'bank_transfer', 'card', 'cheque', 'wallet', 'other'];
 export const PAYMENT_STATUSES = ['pending', 'completed', 'failed', 'refunded'];
@@ -61,6 +62,8 @@ const paymentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+syncable(paymentSchema);
 
 paymentSchema.index({ business: 1, customer: 1, receivedAt: -1 });
 paymentSchema.index({ business: 1, vendor: 1, receivedAt: -1 });

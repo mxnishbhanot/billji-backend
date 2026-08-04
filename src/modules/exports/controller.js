@@ -1,3 +1,5 @@
+import { LIMITS } from '../../constants/entitlements.js';
+import { meterQuota } from '../../middlewares/entitlement.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { logAudit } from '../../services/auditService.js';
 import {
@@ -10,7 +12,7 @@ import {
 } from './service.js';
 
 export const createExport = asyncHandler(async (req, res) => {
-  const row = await requestExport({ business: req.business, user: req.user });
+  const row = await meterQuota(req, LIMITS.exportsPerMonth, () => requestExport({ business: req.business, user: req.user }), { res });
 
   void logAudit(req, {
     action: 'data_export.requested',

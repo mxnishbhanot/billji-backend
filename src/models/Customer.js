@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { liveUniqueIndex, syncable } from './plugins/syncable.js';
 
 const addressSchema = new mongoose.Schema(
   {
@@ -68,11 +69,15 @@ customerSchema.pre('validate', function syncCustomerCompatibility(next) {
   next();
 });
 
+syncable(customerSchema);
+
 customerSchema.index({ business: 1, name: 'text', phone: 'text', email: 'text', gstNumber: 'text' });
 customerSchema.index({ business: 1, isActive: 1 });
 customerSchema.index({ business: 1, updatedAt: -1 });
 customerSchema.index({ business: 1, createdAt: -1 });
 customerSchema.index({ business: 1, name: 1 });
+// Soft-deleted rows release the phone so a re-created walk-in can reuse it.
+customerSchema.index({ business: 1, phone: 1 }, liveUniqueIndex({ phone: { $gt: '' } }));
 
 const Customer = mongoose.model('Customer', customerSchema);
 

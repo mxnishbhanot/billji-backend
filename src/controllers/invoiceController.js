@@ -2,6 +2,7 @@ import { body, query } from 'express-validator';
 import crypto from 'crypto';
 import Invoice from '../models/Invoice.js';
 import { cancelInvoiceWorkflow, computeInvoiceEligibility, createInvoiceWorkflow, deleteInvoiceWorkflow, duplicateInvoiceWorkflow } from '../modules/invoices/service.js';
+import { meterDocument } from '../middlewares/entitlement.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import {
@@ -14,13 +15,13 @@ import {
   resolveDocumentSupply,
   serializeInvoice
 } from '../services/invoiceService.js';
+import { DOCUMENT_KINDS } from '../modules/documents/documentTypes.js';
 import { DEFAULT_REMINDER_TEMPLATE, listPendingReminders, sendReminders } from '../services/reminderService.js';
 import { sendInvoiceEmail } from '../services/emailService.js';
 import { buildInvoiceHtml } from '../services/invoiceHtml.js';
 import { generateInvoicePdf } from '../services/pdfService.js';
-import { getOrRenderInvoicePdf, invalidateInvoicePdf } from '../services/invoicePdfCache.js';
+import { getOrRenderInvoicePdf } from '../services/invoicePdfCache.js';
 import { DOMAIN_EVENTS, publishDomainEvent } from '../services/eventBus.js';
-import { resolveInvoiceReminderNotifications } from '../services/notificationService.js';
 import { emitBusinessEvent } from '../services/socketService.js';
 import { logAudit } from '../services/auditService.js';
 import { paginateQuery, UNPAGINATED_LIST_CAP, wantsPagination } from '../utils/pagination.js';
@@ -53,6 +54,11 @@ export const invoiceRules = [
   body('discountType').optional().isIn(['flat', 'percentage']),
   body('discountValue').optional().isFloat({ min: 0 }),
   body('allowOversell').optional().isBoolean().toBoolean(),
+  // Present only on a document a device issued offline. The value is checked against that
+  // device's numbering series in modules/sync/deviceRegistry; this is the shape check.
+  body('documentNumber').optional({ checkFalsy: true }).isString().trim().isLength({ max: 16 }),
+  body('invoiceNumber').optional({ checkFalsy: true }).isString().trim().isLength({ max: 16 }),
+  body('date').optional({ checkFalsy: true }).isISO8601(),
   body('status').optional().isIn(['pending', 'paid', 'cancelled']),
   body('notes').optional({ nullable: true }).trim().isLength({ max: 1000 })
 ];
@@ -66,6 +72,7 @@ const SORT_OPTIONS = {
 
 export const invoiceQueryRules = [
   query('search').optional({ checkFalsy: true }).trim().isLength({ max: 80 }),
+  query('customerId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid customer id'),
   query('status').optional({ checkFalsy: true }).isIn(['pending', 'paid', 'cancelled']),
   query('from').optional({ checkFalsy: true }).isISO8601(),
   query('to').optional({ checkFalsy: true }).isISO8601(),
@@ -77,11 +84,15 @@ export const invoiceQueryRules = [
 ];
 
 export const listInvoices = asyncHandler(async (req, res) => {
-  const { search = '', status, from, to, minAmount, maxAmount, sort } = req.query;
+  const { search = '', status, from, to, minAmount, maxAmount, sort, customerId } = req.query;
   const filter = { business: req.business._id, documentType: 'invoice' };
 
   if (status) {
     filter.status = status;
+  }
+
+  if (customerId) {
+    filter.customer = customerId;
   }
 
   if (from || to) {
@@ -127,7 +138,11 @@ const emitInvoiceChanges = (businessId, reason, { stockChanged = false } = {}) =
 };
 
 export const createInvoice = asyncHandler(async (req, res) => {
-  const invoice = await createInvoiceWorkflow({ req });
+  // The monthly document quota is charged here, not inside the workflow: the create must be
+  // refused before a number is allocated, and released if the workflow then fails. Offline
+  // pushes come through the same controller with `req.offlineSync` set — those are counted as
+  // overage and never refused (the document is already in a customer's hands).
+  const invoice = await meterDocument(req, () => createInvoiceWorkflow({ req }), { res, offline: Boolean(req.offlineSync) });
 
   void logAudit(req, { action: 'invoice.created', resourceType: 'invoice', resourceId: invoice._id, metadata: { invoiceNumber: invoice.invoiceNumber, total: invoice.total } });
   res.status(201).json({ success: true, invoice: serializeInvoice(invoice, req) });
@@ -146,7 +161,12 @@ export const previewInvoice = asyncHandler(async (req, res) => {
     pricesIncludeTax: Boolean(req.business?.taxSettings?.pricesIncludeTax)
   });
 
+  // The builder previews quotations and challans through this endpoint too — the type
+  // decides the title, watermark and disclaimer the customer will see on the PDF.
+  const documentType = DOCUMENT_KINDS.includes(req.body.documentType) ? req.body.documentType : 'invoice';
+
   const previewInvoiceData = {
+    documentType,
     invoiceNumber: `${req.business.invoicePrefix || 'INV'}-PREVIEW`,
     date: new Date().toISOString(),
     dueDate: null,
@@ -179,34 +199,25 @@ export const getInvoice = asyncHandler(async (req, res) => {
 export const updateInvoiceStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
 
-  if (!['pending', 'paid', 'cancelled'].includes(status)) {
+  // paid/pending must go through the payment/ledger workflows — mutating status here
+  // left invoices looking settled while Customer.outstandingDues still counted them.
+  if (status === 'paid' || status === 'pending') {
+    throw new ApiError(422, 'Record or reverse a payment to change payment status', {
+      code: 'PAYMENT_STATUS_VIA_PAYMENTS'
+    });
+  }
+
+  if (status !== 'cancelled') {
     throw new ApiError(422, 'Invalid invoice status');
   }
 
-  if (status === 'cancelled') {
-    const invoice = await cancelInvoiceWorkflow({ req });
-    void logAudit(req, { action: 'invoice.status_updated', resourceType: 'invoice', resourceId: invoice._id, metadata: { status } });
-    return res.json({ success: true, invoice: serializeInvoice(invoice, req) });
-  }
-
-  const invoice = await getInvoiceForBusiness(req.business._id, req.params.id);
-  invoice.status = status;
-  invoice.paidAmount = status === 'paid' ? invoice.total : 0;
-  invoice.balanceDue = status === 'paid' ? 0 : invoice.total;
-  invoice.updatedBy = req.user._id;
-  await invoice.save();
-  void invalidateInvoicePdf(invoice);
-
-  if (status === 'paid') {
-    await resolveInvoiceReminderNotifications(req.business._id, invoice._id);
-  }
-  emitInvoiceChanges(req.business._id, 'invoice_status_updated');
+  const invoice = await cancelInvoiceWorkflow({ req });
   void logAudit(req, { action: 'invoice.status_updated', resourceType: 'invoice', resourceId: invoice._id, metadata: { status } });
-  res.json({ success: true, invoice: serializeInvoice(invoice, req) });
+  return res.json({ success: true, invoice: serializeInvoice(invoice, req) });
 });
 
 export const duplicateInvoice = asyncHandler(async (req, res) => {
-  const clone = await duplicateInvoiceWorkflow({ req });
+  const clone = await meterDocument(req, () => duplicateInvoiceWorkflow({ req }), { res });
 
   void logAudit(req, { action: 'invoice.duplicated', resourceType: 'invoice', resourceId: clone._id, metadata: { sourceInvoiceId: req.params.id } });
   res.status(201).json({ success: true, invoice: serializeInvoice(clone, req) });
@@ -232,7 +243,9 @@ export const downloadInvoicePdf = asyncHandler(async (req, res) => {
 });
 
 export const publicInvoicePdf = asyncHandler(async (req, res) => {
-  const invoice = await Invoice.findOne({ _id: req.params.id, shareToken: req.params.token, documentType: 'invoice' }).populate('business');
+  // Any sales document, not only tax invoices: a quotation or challan is shared with the
+  // same tokenised link, and the template stamps it for what it is.
+  const invoice = await Invoice.findOne({ _id: req.params.id, shareToken: req.params.token }).populate('business');
 
   if (!invoice) {
     throw new ApiError(404, 'Invoice not found');
@@ -249,7 +262,7 @@ export const publicInvoicePdf = asyncHandler(async (req, res) => {
   const pdf = await getOrRenderInvoicePdf(invoice, invoice.business);
 
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${invoice.invoiceNumber}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${invoice.invoiceNumber || invoice.documentNumber}.pdf"`);
   res.send(pdf);
 });
 

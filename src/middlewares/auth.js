@@ -4,6 +4,7 @@ import Session from '../models/Session.js';
 import User from '../models/User.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { resolveAccess } from '../services/subscriptionService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 
 export const protect = asyncHandler(async (req, _res, next) => {
@@ -56,5 +57,15 @@ export const protect = asyncHandler(async (req, _res, next) => {
   req.business = business;
   req.membership = membership;
   req.session = session;
+
+  // Subscription + resolved entitlements for this request, fetched on first ask and memoized for
+  // the rest of it. Lazy on purpose: most requests never look, and resolving eagerly would add a
+  // query to every single one. Memoized so several guards on one route share a single fetch.
+  let accessPromise = null;
+  req.access = () => {
+    accessPromise = accessPromise || resolveAccess({ business: req.business });
+    return accessPromise;
+  };
+
   next();
 });

@@ -11,6 +11,9 @@ import { verifyGoogleIdToken } from '../config/firebase.js';
 import { permissionsForMembership } from '../middlewares/authorization.js';
 import { logAudit } from '../services/auditService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
+import { currentSubscription } from '../modules/billing/service.js';
+import { MAX_DOCUMENT_PREFIX_LENGTH } from '../services/numberingService.js';
+import { ensureSubscription } from '../services/subscriptionService.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { refreshTokenExpiresAt, signAccessToken, signChallengeToken, signRefreshToken, tokenHash, verifyRefreshToken } from '../utils/jwt.js';
@@ -55,12 +58,23 @@ const publicUser = async (user, business, membership = null) => ({
   roleKey: membership?.roleKey || 'owner',
   permissions: await permissionsForMembership(membership || { roleKey: 'owner' }),
   businessProfile: businessProfile(business),
+  // Same DTO as GET /billing/subscription, so the client has one shape and can gate UI offline
+  // from the persisted auth payload. Additive — no existing field changed.
+  subscription: business ? await currentSubscription({ user, business }) : null,
   createdAt: user.createdAt
 });
 
 // Max concurrent active sessions (logged-in devices) per user. On a new login
 // beyond this, the oldest sessions are revoked so only the freshest 3 survive.
 const MAX_ACTIVE_SESSIONS = 3;
+
+// Puts a brand-new business on the default plan. Never fatal: a signup must not fail because the
+// billing catalog has not been seeded, and resolveAccess() already falls back to the default plan
+// for a business with no subscription row, so the worst case is a row the P7 backfill creates later.
+const provisionSubscription = (business) =>
+  ensureSubscription({ business, actor: { type: 'system', note: 'signup' } }).catch((error) => {
+    console.error('[billing] could not provision a subscription at signup:', error.message);
+  });
 
 const requestIp = (req) => req.ip || req.headers['x-forwarded-for']?.split(',')?.[0]?.trim() || '';
 const requestUserAgent = (req) => req.get('user-agent') || '';
@@ -217,7 +231,14 @@ export const settingsRules = [
   body('pinCode').optional({ nullable: true, checkFalsy: true }).trim().matches(/^\d{6}$/).withMessage('PIN code must be 6 digits'),
   body('state').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 80 }),
   body('panNumber').optional({ nullable: true, checkFalsy: true }).trim().matches(/^[A-Z]{5}[0-9]{4}[A-Z]$/i).withMessage('Enter a valid PAN'),
-  body('invoicePrefix').optional().trim().isLength({ min: 1, max: 12 }),
+  // Capped by the GST 16-character limit on the rendered number, not by the field width.
+  // The schema still permits 12 so existing over-long prefixes keep saving; this only
+  // stops new ones being set.
+  body('invoicePrefix')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: MAX_DOCUMENT_PREFIX_LENGTH })
+    .withMessage(`Invoice prefix must be ${MAX_DOCUMENT_PREFIX_LENGTH} characters or fewer, so the full number stays within the GST 16-character limit`),
   body('reminderTemplate').optional({ nullable: true }).isString().isLength({ max: 1000 }).withMessage('Reminder message must be 1000 characters or fewer'),
   body('theme').optional().isIn(['light', 'dark']),
   body('taxSettings').optional().isObject().withMessage('taxSettings must be an object'),
@@ -260,6 +281,7 @@ export const register = asyncHandler(async (req, res) => {
   });
   user.defaultBusiness = business._id;
   await user.save();
+  await provisionSubscription(business);
 
   const session = await sessionResponse({ req, user, business });
   void logAudit(req, { action: 'auth.registered', resourceType: 'user', resourceId: user._id });
@@ -312,6 +334,7 @@ export const googleSignIn = asyncHandler(async (req, res) => {
     });
     user.defaultBusiness = business._id;
     await user.save();
+    await provisionSubscription(business);
     isNewUser = true;
   }
 
@@ -376,9 +399,21 @@ export const refreshSession = asyncHandler(async (req, res) => {
   if (!session) throw new ApiError(401, 'Refresh token expired or revoked');
 
   const user = await User.findById(session.user).select('-password');
-  const business = await Business.findOne({ _id: session.business, status: 'active' });
-  const membership = business ? await BusinessMember.findOne({ business: business._id, user: user?._id, status: 'active' }) : null;
-  if (!user || !business) throw new ApiError(401, 'Session user or business is no longer active');
+  if (!user) throw new ApiError(401, 'Session user or business is no longer active');
+
+  // Match protect: active workspace is user.defaultBusiness, not the business frozen at login.
+  // switchBusiness never reissues tokens, so session.business can be stale after a switch.
+  let business = user.defaultBusiness ? await Business.findOne({ _id: user.defaultBusiness, status: 'active' }) : null;
+  let membership = business
+    ? await BusinessMember.findOne({ business: business._id, user: user._id, status: 'active' })
+    : null;
+
+  if (!business || !membership) {
+    membership = await BusinessMember.findOne({ user: user._id, status: 'active' }).sort({ joinedAt: 1 });
+    business = membership ? await Business.findOne({ _id: membership.business, status: 'active' }) : null;
+  }
+
+  if (!business || !membership) throw new ApiError(401, 'Session user or business is no longer active');
 
   const refreshTokenId = crypto.randomUUID();
   const accessToken = signAccessToken({ userId: user._id, sessionId: session._id });
@@ -386,6 +421,7 @@ export const refreshSession = asyncHandler(async (req, res) => {
   session.refreshTokenId = refreshTokenId;
   session.refreshTokenHash = tokenHash(refreshToken);
   session.refreshTokenExpiresAt = refreshTokenExpiresAt();
+  session.business = business._id;
   session.lastUsedAt = new Date();
   session.userAgent = requestUserAgent(req) || session.userAgent;
   session.deviceName = requestDeviceName(req) || session.deviceName;

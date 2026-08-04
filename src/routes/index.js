@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import auditRoutes from './auditRoutes.js';
 import authRoutes from './authRoutes.js';
+import billingRoutes from '../modules/billing/routes.js';
 import customerRoutes from './customerRoutes.js';
 import documentRoutes from '../modules/documents/routes.js';
 import draftRoutes from './draftRoutes.js';
@@ -20,12 +21,14 @@ import publicRoutes from './publicRoutes.js';
 import reportRoutes from './reportRoutes.js';
 import roleRoutes from './roleRoutes.js';
 import settingsRoutes from './settingsRoutes.js';
+import syncRoutes from '../modules/sync/routes.js';
 import teamRoutes from './teamRoutes.js';
 
 const router = Router();
 
 router.use('/auth', authRoutes);
 router.use('/audit-logs', auditRoutes);
+router.use('/billing', billingRoutes);
 router.use('/products', productRoutes);
 router.use('/customers', customerRoutes);
 router.use('/documents', documentRoutes);
@@ -45,6 +48,7 @@ router.use('/purchases', purchaseRoutes);
 router.use('/reports', reportRoutes);
 router.use('/roles', roleRoutes);
 router.use('/settings', settingsRoutes);
+router.use('/sync', syncRoutes);
 router.use('/team', teamRoutes);
 
 export default router;
