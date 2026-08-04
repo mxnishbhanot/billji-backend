@@ -1,12 +1,15 @@
+import Business from '../models/Business.js';
 import Coupon, { CouponRedemption } from '../models/Coupon.js';
 import Plan from '../models/Plan.js';
 import Subscription from '../models/Subscription.js';
 import SubscriptionPayment from '../models/SubscriptionPayment.js';
 import { CURRENCY } from '../constants/entitlements.js';
 import { ApiError } from '../utils/ApiError.js';
+import { onPaidSubscription, reverseRewardForPayment } from '../modules/referrals/service.js';
 import { logAudit } from './auditService.js';
 import { discountFor, findApplicableCoupon, redeemCoupon, releaseCoupon, timeGrant } from './couponService.js';
 import { nextPlatformSequence } from './numberingService.js';
+import { grant as grantReward, listGrantsFor, reverse as reverseReward } from './rewardEngine.js';
 import { DEFAULT_PROVIDER, getAutopayProvider, getProvider } from './payments/index.js';
 import { applyPlan, cancelSubscription, ensureSubscription, getSubscription, resolveStatus } from './subscriptionService.js';
 
@@ -17,6 +20,7 @@ import { applyPlan, cancelSubscription, ensureSubscription, getSubscription, res
 // entitlements — those are computed here and snapshotted by subscriptionService.
 
 const asPaise = (value) => Math.max(0, Math.round(value));
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Pricing
@@ -574,7 +578,7 @@ export const applyCapturedPayment = async ({ claimed, actor = { type: 'system' }
   }
 
   const isRenewal = existing && String(existing.plan) === String(plan._id);
-  const bonusMs = claimed.couponCode ? await bonusMsForCoupon(claimed.couponCode) : 0;
+  const bonusDays = claimed.couponCode ? await bonusDaysForCoupon(claimed.couponCode) : 0;
 
   const subscription = await applyPlan({
     business: claimed.business,
@@ -588,11 +592,26 @@ export const applyCapturedPayment = async ({ claimed, actor = { type: 'system' }
     metadata: { paymentId: String(claimed._id), provider: claimed.provider, couponCode: claimed.couponCode }
   });
 
-  // A free-period / trial-extension coupon buys time, applied after the period is set.
-  if (bonusMs > 0 && subscription.currentPeriodEnd) {
-    subscription.currentPeriodEnd = new Date(subscription.currentPeriodEnd.getTime() + bonusMs);
-    subscription.graceEndsAt = subscription.graceEndsAt ? new Date(subscription.graceEndsAt.getTime() + bonusMs) : null;
-    await subscription.save();
+  // A free-period / trial-extension coupon buys time. Granted through the reward engine rather than by
+  // mutating the period here: free time is a reward, and the engine is the only thing allowed to hand
+  // one out. That buys three things this code never had — a RewardGrant ledger row, an idempotency lock
+  // (so a reconciliation replay cannot extend the period twice) and a reversal path on refund.
+  if (bonusDays > 0) {
+    const owner = await Business.findById(claimed.business).select('owner');
+    if (owner?.owner) {
+      await grantReward({
+        rule: 'coupon_time',
+        dedupeKey: String(claimed._id),
+        beneficiary: owner.owner,
+        business: claimed.business,
+        // The plan they actually bought, not a fixed one: a free_period coupon on Business must extend
+        // Business.
+        effect: { planKey: plan.key, days: bonusDays },
+        source: { payment: claimed._id, note: `Coupon ${claimed.couponCode}` },
+        actor,
+        now
+      }).catch((error) => console.error('[billing] coupon time grant failed:', error.message));
+    }
   }
 
   claimed.subscription = subscription._id;
@@ -625,12 +644,25 @@ export const applyCapturedPayment = async ({ claimed, actor = { type: 'system' }
     }
   }
 
+  // Reward Rule 2: the first paid subscription by a referred business pays their referrer a free month.
+  //
+  // Hooked HERE and nowhere else, because this is the single point every real payment reaches — client
+  // verify, webhook, autopay cycle and the reconciliation job all funnel through it, so a referral
+  // cannot be converted twice and cannot be missed. Non-fatal on purpose: a reward that fails must
+  // never fail the activation of a subscription somebody just paid for.
+  // Awaited, but its failure is swallowed: the caller must not see a 500 because a reward could not be
+  // granted, and the referrer's month must be in place before the response says the payment is done —
+  // a fire-and-forget here would make "did my referral pay out?" a race with the next request.
+  await onPaidSubscription({ payment: claimed, now }).catch((error) =>
+    console.error('[referrals] conversion reward failed after payment:', error.message)
+  );
+
   return { payment: claimed, subscription, alreadyApplied: false };
 };
 
 // Read the row directly: applicability was already decided when the price was quoted, and the
 // customer has since paid that price.
-const bonusMsForCoupon = async (code) => timeGrant(await Coupon.findOne({ code }));
+const bonusDaysForCoupon = async (code) => Math.round(timeGrant(await Coupon.findOne({ code })) / DAY_MS);
 
 /**
  * Does a provider-reported amount match what this payment is for?
@@ -853,6 +885,23 @@ export const disableAutopay = async ({ business, now = new Date() }) => {
  * value inside the same atomic operation. Reading `refundedAmount` into JS first and writing back a
  * sum is the shape that produced the double-count.
  */
+/**
+ * Reverses the free days a coupon on this payment granted. Keyed on the payment id, which is the
+ * dedupeKey the grant was written with, so it finds exactly one grant or none.
+ */
+const reverseCouponTimeForPayment = async ({ payment, actor, now }) => {
+  const owner = await Business.findById(payment.business).select('owner');
+  if (!owner?.owner) return null;
+
+  const grants = await listGrantsFor({ beneficiary: owner.owner, rule: 'coupon_time', limit: 20 });
+  const target = grants.find(
+    (candidate) => String(candidate.dedupeKey) === String(payment._id) && candidate.status === 'granted'
+  );
+  if (!target) return null;
+
+  return reverseReward({ grant: target, reason: `Refunded payment ${payment._id}`, actor, now });
+};
+
 export const applyRefund = async ({ payment, refundId = '', amount, eventId = '', actor = { type: 'system' }, now = new Date() }) => {
   const requested = asPaise(amount);
   // A refund with no provider id (a manual reversal recorded by hand) falls back to the event id,
@@ -887,6 +936,18 @@ export const applyRefund = async ({ payment, refundId = '', amount, eventId = ''
       const coupon = await Coupon.findOne({ code: payment.couponCode });
       if (coupon) await releaseCoupon({ coupon, business: payment.business, payment: payment._id }).catch(() => {});
     }
+
+    // Take back every reward this payment produced.
+    //
+    // Two directions, and they are different rewards on different accounts: free days this payment's
+    // own coupon added to THIS business, and the free month it earned the REFERRER of this business.
+    // Leaving either in place turns pay-then-refund into a free month generator.
+    await reverseCouponTimeForPayment({ payment, actor, now }).catch((error) =>
+      console.error('[billing] could not reverse coupon time after refund:', error.message)
+    );
+    await reverseRewardForPayment({ payment, actor, now }).catch((error) =>
+      console.error('[referrals] could not reverse the referrer reward after refund:', error.message)
+    );
 
     const subscription = await getSubscription(payment.business);
     // Only end the period this payment actually bought. A refund of an old payment must not revoke

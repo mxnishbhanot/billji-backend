@@ -40,10 +40,31 @@ const userSchema = new mongoose.Schema(
     // user with a one-off script, never through an API. Schema only in this phase; the
     // requirePlatformAdmin guard and admin routes land in P6.
     platformRole: { type: String, enum: ['none', 'support', 'admin'], default: 'none', index: true },
+    /**
+     * This user's own referral code — short, human-readable, permanent, and never editable: no route
+     * writes it, and referralService only ever fills it in when it is absent.
+     *
+     * No default, and a PARTIAL unique index (below) rather than a sparse one: sparse only skips a
+     * missing field, so `default: null` would put an explicit null on every new user and the second
+     * signup would collide with the first. Same reasoning as the syncable plugin's clientId index.
+     */
+    referralCode: { type: String, trim: true, uppercase: true, maxlength: 12 },
+    /**
+     * Who referred this user. Set once, in the same call that creates the Referral, and never cleared
+     * — not even when a referral is voided, because "has already used a code" must stay true for ever.
+     *
+     * Referral.referredUser (unique) remains the authority; this is the denormalized copy that lets an
+     * eligibility check answer the common case off the user document `protect` already loaded.
+     */
+    referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
     twoFactor: { type: twoFactorSchema, default: () => ({}) }
   },
   { timestamps: true }
 );
+
+// Unique only among users who actually have a code. Users created before the feature carry no field
+// at all until their first referral-screen read (or the backfill script) mints one.
+userSchema.index({ referralCode: 1 }, { unique: true, partialFilterExpression: { referralCode: { $type: 'string' } } });
 
 userSchema.pre('save', async function hashPassword(next) {
   if (!this.isModified('password')) {

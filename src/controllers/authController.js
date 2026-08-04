@@ -12,6 +12,8 @@ import { permissionsForMembership } from '../middlewares/authorization.js';
 import { logAudit } from '../services/auditService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 import { currentSubscription } from '../modules/billing/service.js';
+import { attachReferralAtSignup } from '../modules/referrals/service.js';
+import { signupReferralRule } from '../modules/referrals/schema.js';
 import { MAX_DOCUMENT_PREFIX_LENGTH } from '../services/numberingService.js';
 import { ensureSubscription } from '../services/subscriptionService.js';
 import { ApiError } from '../utils/ApiError.js';
@@ -163,7 +165,10 @@ const respondWithSessionOr2fa = async ({ req, res, user, business, statusCode = 
 export const registerRules = [
   body('name').trim().notEmpty().withMessage('Name is required').isLength({ max: 80 }),
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail(EMAIL_NORMALIZE),
-  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  // Optional. A code that is wrong, used, or belongs to the signer-upper never fails the signup —
+  // see attachReferralAtSignup.
+  signupReferralRule
 ];
 
 export const loginRules = [
@@ -176,7 +181,8 @@ export const refreshRules = [
 ];
 
 export const googleRules = [
-  body('idToken').isString().trim().notEmpty().withMessage('Google ID token is required')
+  body('idToken').isString().trim().notEmpty().withMessage('Google ID token is required'),
+  signupReferralRule
 ];
 
 export const resetRequestRules = [
@@ -283,9 +289,14 @@ export const register = asyncHandler(async (req, res) => {
   await user.save();
   await provisionSubscription(business);
 
+  // Before sessionResponse, so the session payload already carries the Pro subscription the referral
+  // just granted and the app is Pro on its first render — no extra round trip, no sync op needed on
+  // the happy path.
+  const referral = await attachReferralAtSignup({ user, business, code: req.body.referralCode, req });
+
   const session = await sessionResponse({ req, user, business });
   void logAudit(req, { action: 'auth.registered', resourceType: 'user', resourceId: user._id });
-  res.status(201).json(session);
+  res.status(201).json({ ...session, referral });
 });
 
 export const login = asyncHandler(async (req, res) => {
@@ -335,6 +346,8 @@ export const googleSignIn = asyncHandler(async (req, res) => {
     user.defaultBusiness = business._id;
     await user.save();
     await provisionSubscription(business);
+    // Google signups can carry a code too — the app collects it on the same screen.
+    await attachReferralAtSignup({ user, business, code: req.body.referralCode, req });
     isNewUser = true;
   }
 

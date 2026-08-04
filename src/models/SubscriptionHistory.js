@@ -18,7 +18,11 @@ export const SUBSCRIPTION_ACTIONS = [
   'reactivated',
   'grace_entered',
   'resnapshot',
-  'admin_override'
+  'admin_override',
+  // Plan time granted by the reward engine (referral, coupon free-period, a future campaign).
+  // Its own action rather than 'activated'/'renewed' so revenue reporting can tell paid months from
+  // free ones — a reward row carries amount 0 and would otherwise look like a ₹0 sale.
+  'reward_granted'
 ];
 
 const subscriptionHistorySchema = new mongoose.Schema(

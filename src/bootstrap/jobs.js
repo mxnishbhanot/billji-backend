@@ -7,6 +7,7 @@ import {
   sendRenewalReminders
 } from '../services/billingReconciliation.js';
 import { runReminderMaterialization } from '../services/reminderService.js';
+import { reconcileUnappliedGrants } from '../services/rewardEngine.js';
 import { registerJob } from '../services/scheduler.js';
 
 const MINUTE_MS = 60 * 1000;
@@ -50,6 +51,15 @@ export const registerScheduledJobs = () => {
     key: 'billing:autopay-debit-notices',
     everyMs: 6 * HOUR_MS,
     run: () => sendAutopayDebitNotices()
+  });
+
+  // A reward whose lock was written but whose plan time never landed (a crash between the two writes).
+  // Its own job for the same reason activations have one: every retry of the original call sees the
+  // lock and reports success, so nothing else would ever repair it.
+  registerJob({
+    key: 'rewards:reconcile-grants',
+    everyMs: 15 * MINUTE_MS,
+    run: () => reconcileUnappliedGrants()
   });
 
   // Hourly, and its own job for the same reason as activations: a mandate that charged without telling

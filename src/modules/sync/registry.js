@@ -6,6 +6,7 @@ import Invoice from '../../models/Invoice.js';
 import Order from '../../models/Order.js';
 import Payment from '../../models/Payment.js';
 import Product from '../../models/Product.js';
+import Referral from '../../models/Referral.js';
 import PurchaseBill from '../../models/PurchaseBill.js';
 import Vendor from '../../models/Vendor.js';
 import {
@@ -32,6 +33,8 @@ import {
   recordPaymentRules
 } from '../payments/schema.js';
 import { createPurchase, createVendor, purchaseRules, updateVendor, vendorRules } from '../purchases/controller.js';
+import { applyReferral } from '../referrals/controller.js';
+import { applyReferralRules } from '../referrals/schema.js';
 import { commitPushedDocumentNumber, guardPushedDocumentNumber } from './deviceRegistry.js';
 
 // Fields a device must never receive: a share token is a bearer credential for the public
@@ -227,6 +230,18 @@ export const PUSH_OPERATIONS = {
     model: Payment,
     resultKey: 'payment',
     params: (op) => ({ invoiceId: op.payload?.invoiceId })
+  },
+  // A referral code typed while the device was offline, or one whose attach failed during signup.
+  // Routed to the same controller, validator chain and permission as POST /referrals/apply — the
+  // server decides validity, eligibility and the reward, exactly as it does online. Fully idempotent:
+  // the push path echo-matches on clientId, Referral.referredUser is unique, and the reward engine
+  // holds its own (rule, dedupeKey) lock, so a replayed op can never mint a second free month.
+  'referral:create': {
+    permission: PERMISSIONS.billingManage,
+    rules: applyReferralRules,
+    handler: applyReferral,
+    model: Referral,
+    resultKey: 'referral'
   },
   'customerPayment:create': {
     permission: PERMISSIONS.paymentsRecord,

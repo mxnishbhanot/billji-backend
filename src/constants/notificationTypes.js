@@ -16,7 +16,11 @@ export const NOTIFICATION_TYPES = [
   'subscription-grace',
   'autopay-debit-upcoming',
   'autopay-failed',
-  'autopay-halted'
+  'autopay-halted',
+  // Any reward the reward engine grants (referral signup, referral conversion, coupon free days).
+  // One type rather than one per rule: to the shopkeeper they are all "you got free Pro time", and a
+  // per-rule type would mean a mute switch per campaign.
+  'reward-granted'
 ];
 
 export const NOTIFICATION_CHANNELS = ['inApp', 'push'];
