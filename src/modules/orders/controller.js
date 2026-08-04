@@ -1,3 +1,4 @@
+import { meterDocument } from '../../middlewares/entitlement.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { logAudit } from '../../services/auditService.js';
 import { emitBusinessEvent } from '../../services/socketService.js';
@@ -108,7 +109,9 @@ export const getOrder = asyncHandler(async (req, res) => {
 });
 
 export const generateInvoiceFromOrder = asyncHandler(async (req, res) => {
-  const invoice = await generateInvoiceForOrderWorkflow({ req });
+  // Invoicing an order issues a real invoice, so it is metered like any other. The order itself
+  // is not a document and is not counted — nothing was issued to the customer yet.
+  const invoice = await meterDocument(req, () => generateInvoiceForOrderWorkflow({ req }), { res });
 
   void logAudit(req, { action: 'invoice.created', resourceType: 'invoice', resourceId: invoice._id, metadata: { invoiceNumber: invoice.invoiceNumber, total: invoice.total, sourceOrder: invoice.sourceOrder } });
   void logAudit(req, { action: 'order.invoiced', resourceType: 'order', resourceId: invoice.sourceOrder, metadata: { invoiceNumber: invoice.invoiceNumber } });

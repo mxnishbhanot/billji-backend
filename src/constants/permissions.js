@@ -89,6 +89,16 @@ export const PERMISSION_GROUPS = [
     ]
   },
   {
+    domain: 'billing',
+    label: 'Plan & billing',
+    permissions: [
+      { name: 'billingView', key: 'billing.view', label: 'View plan, usage & invoices' },
+      // Separate from settings.manage on purpose: letting a manager edit invoice templates is not
+      // the same as letting them spend the owner's money.
+      { name: 'billingManage', key: 'billing.manage', label: 'Change plan & make payments' }
+    ]
+  },
+  {
     domain: 'roles',
     label: 'Roles',
     permissions: [

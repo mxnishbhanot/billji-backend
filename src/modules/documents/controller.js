@@ -1,5 +1,6 @@
 import { body, param, query } from 'express-validator';
 import Invoice from '../../models/Invoice.js';
+import { meterDocument } from '../../middlewares/entitlement.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { logAudit } from '../../services/auditService.js';
@@ -81,7 +82,9 @@ export const getDocument = asyncHandler(async (req, res) => {
 
 export const createDocument = asyncHandler(async (req, res) => {
   const documentType = documentTypeFrom(req);
-  const document = await createDocumentWorkflow({ req, documentType });
+  // A quotation, challan or credit note is a numbered sales document, so it costs a document
+  // from the monthly quota exactly like an invoice does.
+  const document = await meterDocument(req, () => createDocumentWorkflow({ req, documentType }), { res });
 
   void logAudit(req, {
     action: `${documentType}.created`,
@@ -96,7 +99,7 @@ export const createDocument = asyncHandler(async (req, res) => {
 
 export const convertDocument = asyncHandler(async (req, res) => {
   const documentType = documentTypeFrom(req);
-  const invoice = await convertDocumentWorkflow({ req, documentType });
+  const invoice = await meterDocument(req, () => convertDocumentWorkflow({ req, documentType }), { res });
 
   void logAudit(req, {
     action: `${documentType}.converted`,

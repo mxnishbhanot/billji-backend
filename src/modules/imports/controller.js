@@ -1,4 +1,6 @@
 import { body } from 'express-validator';
+import { LIMITS } from '../../constants/entitlements.js';
+import { meterQuota } from '../../middlewares/entitlement.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { logAudit } from '../../services/auditService.js';
 import { emitBusinessEvent } from '../../services/socketService.js';
@@ -45,14 +47,22 @@ export const previewImport = asyncHandler(async (req, res) => {
 });
 
 export const runImport = asyncHandler(async (req, res) => {
-  const result = await commitImport({
-    businessId: req.business._id,
-    actorId: req.user._id,
-    type: req.body.type,
-    csv: req.body.csv,
-    columnMap: req.body.columnMap,
-    mode: req.body.mode
-  });
+  // One import run = one unit, whatever the row count. A preview is free because nothing is
+  // written; only the commit is charged.
+  const result = await meterQuota(
+    req,
+    LIMITS.importsPerMonth,
+    () =>
+      commitImport({
+        businessId: req.business._id,
+        actorId: req.user._id,
+        type: req.body.type,
+        csv: req.body.csv,
+        columnMap: req.body.columnMap,
+        mode: req.body.mode
+      }),
+    { res }
+  );
 
   void logAudit(req, {
     action: 'import.completed',

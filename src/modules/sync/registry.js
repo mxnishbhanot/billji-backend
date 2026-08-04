@@ -1,3 +1,4 @@
+import { FEATURES } from '../../constants/entitlements.js';
 import { PERMISSIONS } from '../../middlewares/authorization.js';
 import Customer from '../../models/Customer.js';
 import Expense from '../../models/Expense.js';
@@ -84,6 +85,13 @@ const byTargetId = (op) => ({ id: op.targetId });
 //
 // Entities absent by design: invoice update (an issued invoice is immutable), order and
 // purchase mutation (their state changes are domain actions, which are a later phase).
+//
+// `feature` is the subscription counterpart of `permission`: route middleware never runs on this
+// path, so an entry that needs an entitlement declares it here and the push executor enforces it
+// with the same helper the routes use. There is deliberately no `meter` field — every metered
+// create is metered inside its controller, which this path *does* run, and metering a document
+// twice would be worse than not metering it at all. The push path marks the request as offline
+// so those in-controller quotas count and warn instead of refusing (§offline rule).
 export const PUSH_OPERATIONS = {
   'product:create': {
     permission: PERMISSIONS.productsManage,
@@ -159,6 +167,7 @@ export const PUSH_OPERATIONS = {
   },
   'expense:create': {
     permission: PERMISSIONS.expensesManage,
+    feature: FEATURES.expenses,
     rules: expenseRules,
     handler: createExpense,
     model: Expense,
@@ -166,6 +175,7 @@ export const PUSH_OPERATIONS = {
   },
   'expense:update': {
     permission: PERMISSIONS.expensesManage,
+    feature: FEATURES.expenses,
     rules: expenseRules,
     handler: updateExpense,
     model: Expense,
@@ -175,6 +185,7 @@ export const PUSH_OPERATIONS = {
   },
   'expense:delete': {
     permission: PERMISSIONS.expensesManage,
+    feature: FEATURES.expenses,
     handler: deleteExpense,
     model: Expense,
     params: byTargetId,
@@ -182,6 +193,7 @@ export const PUSH_OPERATIONS = {
   },
   'vendor:create': {
     permission: PERMISSIONS.purchasesManage,
+    feature: FEATURES.purchases,
     rules: vendorRules,
     handler: createVendor,
     model: Vendor,
@@ -189,6 +201,7 @@ export const PUSH_OPERATIONS = {
   },
   'vendor:update': {
     permission: PERMISSIONS.purchasesManage,
+    feature: FEATURES.purchases,
     rules: vendorRules,
     handler: updateVendor,
     model: Vendor,
@@ -198,6 +211,7 @@ export const PUSH_OPERATIONS = {
   },
   'purchase:create': {
     permission: PERMISSIONS.purchasesManage,
+    feature: FEATURES.purchases,
     rules: purchaseRules,
     handler: createPurchase,
     model: PurchaseBill,

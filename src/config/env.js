@@ -66,6 +66,24 @@ export const env = {
     publicBaseUrl: process.env.R2_PUBLIC_BASE_URL || '',
     // Presigned-URL lifetime in seconds (used when publicBaseUrl is unset).
     signedUrlTtlSeconds: Number(process.env.R2_SIGNED_URL_TTL_SECONDS || 900)
+  },
+  billing: {
+    // Subscription enforcement kill-switch. off = today's behaviour, warn = count and warn but
+    // never block (the rollout's observation window), on = refuse with 402. Unknown values read
+    // as `off` — a typo must never start blocking paying customers. Read per request by
+    // middlewares/entitlement.js, so a value can also be flipped in tests.
+    enforcement: (process.env.BILLING_ENFORCEMENT || 'off').toLowerCase()
+  },
+  // Razorpay is a payment PROCESSOR, nothing more. BillJi owns plans, periods, entitlements and
+  // renewals; Razorpay only confirms that money moved. When keyId/keySecret are unset the
+  // provider reports itself unconfigured and checkout returns 503 — no silent half-working mode.
+  razorpay: {
+    keyId: process.env.RAZORPAY_KEY_ID || '',
+    keySecret: process.env.RAZORPAY_KEY_SECRET || '',
+    // Separate secret, set in the Razorpay dashboard per webhook. NOT keySecret — a webhook
+    // signed with the API secret would mean anyone holding it could forge activations.
+    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
+    apiBaseUrl: process.env.RAZORPAY_API_BASE_URL || 'https://api.razorpay.com/v1'
   }
 };
 
@@ -76,6 +94,14 @@ if (isProduction) {
   if (!process.env.MONGODB_URI) missing.push('MONGODB_URI');
   if (!process.env.JWT_SECRET || env.jwtSecret === 'dev-only-change-me') missing.push('JWT_SECRET');
   if (!process.env.REFRESH_TOKEN_SECRET && !process.env.JWT_SECRET) missing.push('REFRESH_TOKEN_SECRET');
+
+  // Razorpay is optional overall (billing can be off), but half-configured is worse than off:
+  // a key without a webhook secret means payments activate on the client's word alone.
+  const razorpayVars = ['RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'];
+  const razorpaySet = razorpayVars.filter((name) => process.env[name]);
+  if (razorpaySet.length && razorpaySet.length !== razorpayVars.length) {
+    missing.push(...razorpayVars.filter((name) => !process.env[name]));
+  }
 
   if (missing.length) {
     throw new Error(`Missing required production environment variables: ${missing.join(', ')}`);

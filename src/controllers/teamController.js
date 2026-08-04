@@ -6,7 +6,9 @@ import BusinessMember from '../models/BusinessMember.js';
 import Role from '../models/Role.js';
 import User from '../models/User.js';
 import { env, isProduction } from '../config/env.js';
+import { LIMITS } from '../constants/entitlements.js';
 import { permissionsForRoleKey } from '../middlewares/authorization.js';
+import { attachBillingWarning, checkLimitAllowed, enforcementMode } from '../middlewares/entitlement.js';
 import { logAudit } from '../services/auditService.js';
 import { sendTeamInviteEmail } from '../services/emailService.js';
 import { canInvite } from '../services/teamLimitService.js';
@@ -273,9 +275,34 @@ export const inviteMember = asyncHandler(async (req, res) => {
   const pending = await BusinessInvitation.findOne({ business: req.business._id, email, status: 'pending' });
   if (pending) throw new ApiError(409, 'An invitation for this email is already pending');
 
-  const { allowed, limit } = await canInvite(req.business);
+  const { allowed, limit, count } = await canInvite(req.business);
   if (!allowed) {
-    throw new ApiError(403, `Your plan allows up to ${limit} team members. Upgrade to add more.`, { code: 'MEMBER_LIMIT_REACHED' });
+    // The seat cap is the one limit this app enforced BEFORE billing existed, so no enforcement mode
+    // may relax it. `warn` means "add a warning to what already happens", never "stop enforcing":
+    // a mode whose job is to observe must not be the mode that lets a Starter business fill a paid
+    // plan's team. So every mode refuses; only the envelope differs.
+    //
+    //   off   403, exactly as before billing.
+    //   warn  403, plus the billing warning and the analytics event `on` would have recorded.
+    //   on    402 with upgrade options when the engine objects, else the same legacy 403.
+    if (enforcementMode() !== 'off') {
+      // Throws the 402 in `on`; records `billing.limit.warned` and returns in `warn`.
+      await checkLimitAllowed({ req, res, limitKey: LIMITS.teamMembers, used: count });
+      // The engine had no objection, so the refusal came from the pre-billing legacy cap. Keep it.
+      attachBillingWarning(req, res, {
+        code: 'LIMIT_EXCEEDED',
+        metric: LIMITS.teamMembers,
+        limit: Number.isFinite(limit) ? limit : null,
+        used: count,
+        message: `Your plan allows up to ${limit} team members.`
+      });
+    }
+
+    throw new ApiError(403, `Your plan allows up to ${limit} team members. Upgrade to add more.`, {
+      code: 'MEMBER_LIMIT_REACHED',
+      limit: Number.isFinite(limit) ? limit : null,
+      used: count
+    });
   }
 
   const { invitation, token, emailError } = await issueInvite(req, { email, ...assignment });

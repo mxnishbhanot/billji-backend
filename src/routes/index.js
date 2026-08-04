@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import auditRoutes from './auditRoutes.js';
 import authRoutes from './authRoutes.js';
+import billingRoutes from '../modules/billing/routes.js';
 import customerRoutes from './customerRoutes.js';
 import documentRoutes from '../modules/documents/routes.js';
 import draftRoutes from './draftRoutes.js';
@@ -27,6 +28,7 @@ const router = Router();
 
 router.use('/auth', authRoutes);
 router.use('/audit-logs', auditRoutes);
+router.use('/billing', billingRoutes);
 router.use('/products', productRoutes);
 router.use('/customers', customerRoutes);
 router.use('/documents', documentRoutes);

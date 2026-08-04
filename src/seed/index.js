@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { bootstrapBilling } from '../bootstrap/billing.js';
 import { bootstrapRbac } from '../bootstrap/rbac.js';
 import { connectDB } from '../config/db.js';
 import Business from '../models/Business.js';
@@ -6,12 +7,15 @@ import BusinessMember from '../models/BusinessMember.js';
 import Customer from '../models/Customer.js';
 import Invoice from '../models/Invoice.js';
 import Product from '../models/Product.js';
+import Subscription from '../models/Subscription.js';
 import User from '../models/User.js';
 import { buildInvoicePayload, setInvoicePdfUrl, stockAdjustmentsForInvoice } from '../services/invoiceService.js';
+import { ensureSubscription } from '../services/subscriptionService.js';
 
 const seed = async () => {
   await connectDB();
   await bootstrapRbac();
+  await bootstrapBilling();
 
   // Idempotent seed: clear any prior demo data so re-running does not collide
   // on unique indexes or accumulate duplicates.
@@ -24,6 +28,7 @@ const seed = async () => {
       Product.deleteMany({ business: { $in: businessIds } }),
       Customer.deleteMany({ business: { $in: businessIds } }),
       BusinessMember.deleteMany({ business: { $in: businessIds } }),
+      Subscription.deleteMany({ business: { $in: businessIds } }),
       Business.deleteMany({ owner: existing._id }),
       User.deleteOne({ _id: existing._id })
     ]);
@@ -46,6 +51,9 @@ const seed = async () => {
   await BusinessMember.create({ business: business._id, user: user._id, roleKey: 'owner', joinedAt: new Date() });
   user.defaultBusiness = business._id;
   await user.save();
+
+  // Demo business lands on the default (Starter) plan, same as a real signup.
+  await ensureSubscription({ business, actor: { type: 'system', note: 'seed' } });
 
   const products = await Product.insertMany([
     { business: business._id, createdBy: user._id, updatedBy: user._id, name: 'Premium Coffee Beans', price: 450, stockQuantity: 24, sku: 'COF-001', category: 'Grocery' },

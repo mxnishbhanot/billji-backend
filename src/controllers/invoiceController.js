@@ -2,6 +2,7 @@ import { body, query } from 'express-validator';
 import crypto from 'crypto';
 import Invoice from '../models/Invoice.js';
 import { cancelInvoiceWorkflow, computeInvoiceEligibility, createInvoiceWorkflow, deleteInvoiceWorkflow, duplicateInvoiceWorkflow } from '../modules/invoices/service.js';
+import { meterDocument } from '../middlewares/entitlement.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import {
@@ -137,7 +138,11 @@ const emitInvoiceChanges = (businessId, reason, { stockChanged = false } = {}) =
 };
 
 export const createInvoice = asyncHandler(async (req, res) => {
-  const invoice = await createInvoiceWorkflow({ req });
+  // The monthly document quota is charged here, not inside the workflow: the create must be
+  // refused before a number is allocated, and released if the workflow then fails. Offline
+  // pushes come through the same controller with `req.offlineSync` set — those are counted as
+  // overage and never refused (the document is already in a customer's hands).
+  const invoice = await meterDocument(req, () => createInvoiceWorkflow({ req }), { res, offline: Boolean(req.offlineSync) });
 
   void logAudit(req, { action: 'invoice.created', resourceType: 'invoice', resourceId: invoice._id, metadata: { invoiceNumber: invoice.invoiceNumber, total: invoice.total } });
   res.status(201).json({ success: true, invoice: serializeInvoice(invoice, req) });
@@ -212,7 +217,7 @@ export const updateInvoiceStatus = asyncHandler(async (req, res) => {
 });
 
 export const duplicateInvoice = asyncHandler(async (req, res) => {
-  const clone = await duplicateInvoiceWorkflow({ req });
+  const clone = await meterDocument(req, () => duplicateInvoiceWorkflow({ req }), { res });
 
   void logAudit(req, { action: 'invoice.duplicated', resourceType: 'invoice', resourceId: clone._id, metadata: { sourceInvoiceId: req.params.id } });
   res.status(201).json({ success: true, invoice: serializeInvoice(clone, req) });

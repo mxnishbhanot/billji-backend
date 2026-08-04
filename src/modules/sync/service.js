@@ -1,5 +1,6 @@
 import { validationResult } from 'express-validator';
 import { INCLUDE_DELETED } from '../../models/plugins/syncable.js';
+import { billingWarningsFor, checkFeatureAccess } from '../../middlewares/entitlement.js';
 import { idempotency } from '../../middlewares/idempotency.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { encodeCursor, syncHorizon } from './protocol.js';
@@ -139,6 +140,11 @@ const subRequest = (req, op, params) => {
   const value = (input) => ({ value: input, writable: true, configurable: true, enumerable: true });
 
   return Object.defineProperties(Object.create(req), {
+    // Every push operation was created on a device with no network. Controllers read this to
+    // count a plan overage instead of refusing work that already happened (§offline rule).
+    offlineSync: value(true),
+    // Own property so a warning raised by one operation is not reported against the other 49.
+    billingWarnings: value([]),
     body: value(op.payload ?? {}),
     params: value(params),
     query: value({}),
@@ -244,6 +250,19 @@ const runOperation = async (req, op, permissions) => {
   const params = definition.params ? definition.params(op) : {};
   const subReq = subRequest(req, op, params);
 
+  // Subscription enforcement, on the path that route middleware never sees. Same helper, same modes
+  // as the online routes — but nothing here refuses, in any mode.
+  //
+  // Neither a limit nor a feature may reject a push: the record already exists on a device that was
+  // offline when it was made. A 402 here does not undo the work, it strands the row (the device cannot
+  // sync it, ever) and loses it at the next reinstall. Both are therefore counted, flagged and audited
+  // instead — quota as overage inside the controller, features as
+  // `billing.feature.overage_offline` here — and the warning travels back with this operation's result
+  // so the app can prompt an upgrade.
+  if (definition.feature) {
+    await checkFeatureAccess({ req: subReq, res: null, featureKey: definition.feature, offline: true });
+  }
+
   if (definition.rules?.length) {
     await Promise.all(definition.rules.map((rule) => rule.run(subReq)));
     const errors = validationResult(subReq);
@@ -284,7 +303,11 @@ const runOperation = async (req, op, permissions) => {
   // burned. Advancing before the write would leave a gap every time a create failed.
   if (definition.after) await definition.after(req, record, claim);
 
-  return success(op, record);
+  // Plan warnings raised while this operation ran (an over-quota offline document, a feature the
+  // plan no longer includes while enforcement is in warn mode) travel back with its result.
+  const warnings = billingWarningsFor(subReq);
+
+  return success(op, record, warnings.length ? { warnings } : {});
 };
 
 // A batch is not one transaction — 47 ok, 2 conflicts and 1 rejection is a valid answer.
