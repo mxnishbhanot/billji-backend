@@ -6,7 +6,7 @@ import Subscription from '../src/models/Subscription.js';
 import SubscriptionPayment from '../src/models/SubscriptionPayment.js';
 import { nextReceiptNumber, prorationCredit, refundPayment } from '../src/services/billingService.js';
 import { clearPlanCache } from '../src/services/entitlementService.js';
-import { availableProviders, getProvider } from '../src/services/payments/index.js';
+import { availableProviders, getAutopayProvider, getProvider } from '../src/services/payments/index.js';
 import { applyPlan, ensureSubscription, resolveStatus } from '../src/services/subscriptionService.js';
 import { useMongoTestDb } from './helpers/db.js';
 import { createTestContext } from './helpers/fixtures.js';
@@ -46,6 +46,18 @@ describe('provider registry', () => {
   it('never exposes a secret through publicConfig', () => {
     assert.deepEqual(Object.keys(getProvider('razorpay').publicConfig()), ['keyId']);
   });
+
+  it('gates autopay on a declared capability, not on duck-typing', () => {
+    // A flag reads as a decision; `typeof provider.createSubscription === 'function'` reads as an
+    // accident and would start answering true the day someone lands a half-finished method.
+    assert.equal(getAutopayProvider('razorpay').name, 'razorpay');
+    assert.throws(() => getAutopayProvider('manual'), (error) => error.details?.code === 'PROVIDER_NO_AUTOPAY');
+  });
+
+  it('still refuses an unconfigured provider on the autopay path', () => {
+    unconfigureRazorpay();
+    assert.throws(() => getAutopayProvider('razorpay'), (error) => error.statusCode === 503);
+  });
 });
 
 describe('manual provider', () => {
@@ -69,6 +81,16 @@ describe('manual provider', () => {
   it('has no webhooks and nothing to fetch', async () => {
     assert.throws(() => manual().parseWebhook({}), /no webhooks/);
     await assert.rejects(manual().fetchPayment('x'), /no provider record/);
+  });
+
+  it('cannot hold a mandate, and does not pretend to', () => {
+    // Undefined rather than throwing stubs: a caller that skipped getAutopayProvider should die on a
+    // TypeError at the exact wrong line, not on a 400 that reads like the customer's fault.
+    assert.equal(manual().supportsAutopay, false);
+    assert.equal(manual().createSubscription, undefined);
+    assert.equal(manual().ensureProviderPlan, undefined);
+    assert.equal(manual().cancelProviderSubscription, undefined);
+    assert.equal(manual().verifyMandateSignature, undefined);
   });
 });
 

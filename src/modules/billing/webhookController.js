@@ -1,6 +1,8 @@
 import SubscriptionPayment from '../../models/SubscriptionPayment.js';
 import { ApiError } from '../../utils/ApiError.js';
-import { activateFromPayment, applyRefund, failPayment } from '../../services/billingService.js';
+import { activateFromPayment, amountMatchesPayment, applyRefund, failPayment } from '../../services/billingService.js';
+import { AUTOPAY_EVENTS, handleAutopayEvent } from '../../services/autopayService.js';
+import { logAudit } from '../../services/auditService.js';
 import { getProvider } from '../../services/payments/index.js';
 
 // Provider webhooks. THE authority on whether money moved — the client verify path exists only so
@@ -16,7 +18,16 @@ import { getProvider } from '../../services/payments/index.js';
 // Never trust a field in the body over our own record. The event names a payment; the amount,
 // plan, period and entitlements all come from the row we created at checkout.
 
-const HANDLED = new Set(['payment.captured', 'payment.failed', 'order.paid', 'refund.created', 'refund.processed']);
+const HANDLED = new Set([
+  'payment.captured',
+  'payment.failed',
+  'order.paid',
+  'refund.created',
+  'refund.processed',
+  // Autopay mandate lifecycle. Handled in autopayService, which keys off the mandate rather than a
+  // payment row.
+  ...AUTOPAY_EVENTS
+]);
 
 const findPayment = async ({ orderId, paymentId, raw }) => {
   // Order id first: it is the id we wrote at checkout, so it is the strongest link.
@@ -49,6 +60,19 @@ export const handleProviderWebhook = async (req, res) => {
     return res.json({ success: true, ignored: event.event });
   }
 
+  // Autopay branches BEFORE findPayment, and that ordering is load-bearing: a recurring cycle has no
+  // payment row until its own charge event creates one, so findPayment would answer `unmatched` and
+  // silently drop a renewal. Everything below this line is untouched by autopay, which is what keeps
+  // manual purchases behaving exactly as they did.
+  if (event.event.startsWith('subscription.')) {
+    try {
+      return await handleAutopayEvent({ event, res });
+    } catch (error) {
+      console.error(`[billing] failed to apply ${event.event} (${event.eventId}):`, error.message);
+      return res.status(500).json({ success: false, message: 'Could not process the event' });
+    }
+  }
+
   const payment = await findPayment(event);
   if (!payment) {
     // A genuine, signed event we cannot tie to a checkout — a dashboard-created payment, or a
@@ -60,6 +84,28 @@ export const handleProviderWebhook = async (req, res) => {
   // One atomic dedup for every event type: if this id was already applied, nothing happens.
   if (payment.webhookEventIds?.includes(event.eventId)) {
     return res.json({ success: true, duplicate: true });
+  }
+
+  // What the provider says was paid must be what we asked for, on this path too — the client verify
+  // path has always checked it. An order fixes its amount, so a mismatch is not a rounding
+  // difference: it is a partial capture, a dashboard-edited payment or an event from another
+  // environment. Grant nothing, flag the row, and acknowledge — retrying cannot make the amounts
+  // agree, so a 5xx would only produce hours of pointless redelivery.
+  if (['payment.captured', 'order.paid'].includes(event.event) && !amountMatchesPayment(payment, event.amount)) {
+    console.error(
+      `[billing] webhook ${event.event} amount ${event.amount} does not match payment ${payment._id} (${payment.netAmount})`
+    );
+    payment.failureReason = `Webhook amount ${event.amount} does not match the order amount ${payment.netAmount}; needs manual review`;
+    await payment.save();
+    void logAudit(null, {
+      business: payment.business,
+      action: 'billing.webhook.amount_mismatch',
+      resourceType: 'subscription',
+      resourceId: String(payment._id),
+      metadata: { event: event.event, eventId: event.eventId, expected: payment.netAmount, received: event.amount }
+    });
+
+    return res.json({ success: true, amountMismatch: true });
   }
 
   try {

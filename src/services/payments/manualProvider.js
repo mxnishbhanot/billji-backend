@@ -14,6 +14,12 @@ import { ApiError } from '../../utils/ApiError.js';
 export const manualProvider = {
   name: 'manual',
 
+  // There is no mandate to hold: a bank transfer cannot debit itself. `getAutopayProvider` refuses
+  // on this flag, and the five autopay methods are LEFT UNDEFINED on purpose — a caller that
+  // skipped the gate should die on a TypeError at the exact wrong line, not on a
+  // PROVIDER_UNSUPPORTED 400 that reads like the customer did something wrong.
+  supportsAutopay: false,
+
   isConfigured: () => true,
 
   publicConfig: () => ({}),

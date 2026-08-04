@@ -67,6 +67,13 @@ export const env = {
     // Presigned-URL lifetime in seconds (used when publicBaseUrl is unset).
     signedUrlTtlSeconds: Number(process.env.R2_SIGNED_URL_TTL_SECONDS || 900)
   },
+  billing: {
+    // Subscription enforcement kill-switch. off = today's behaviour, warn = count and warn but
+    // never block (the rollout's observation window), on = refuse with 402. Unknown values read
+    // as `off` — a typo must never start blocking paying customers. Read per request by
+    // middlewares/entitlement.js, so a value can also be flipped in tests.
+    enforcement: (process.env.BILLING_ENFORCEMENT || 'off').toLowerCase()
+  },
   // Razorpay is a payment PROCESSOR, nothing more. BillJi owns plans, periods, entitlements and
   // renewals; Razorpay only confirms that money moved. When keyId/keySecret are unset the
   // provider reports itself unconfigured and checkout returns 503 — no silent half-working mode.

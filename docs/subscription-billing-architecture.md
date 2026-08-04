@@ -1162,3 +1162,417 @@ Full suite: **532 tests, 532 pass** — 87 new since P2, zero regressions.
    `payment.failed`, `order.paid`, `refund.created`, `refund.processed`.
 3. **The GST receipt decisions in 14.6.**
 4. **Google Play Billing (6.4)** still blocks P5 shipping, not P4 building.
+
+---
+
+## 15. Phase 4 — implemented
+
+Enforcement exists and is **off by default**. `BILLING_ENFORCEMENT=off|warn|on` decides whether a
+plan can refuse anything; `off` is byte-for-byte today's behaviour, and it is what ships.
+
+### 15.1 One module, two questions kept apart
+
+`src/middlewares/entitlement.js` is the only place allowed to turn an entitlement into a refusal.
+RBAC answers "is this person allowed?" (**403**), this answers "did this business buy it?"
+(**402**), and on every route `requirePermission` runs **first** — a staff member without
+`expenses.view` is told that, and never shown a paywall for a module they could not use anyway.
+A test asserts that order.
+
+Nothing here re-implements the engines: it calls `canAccessFeature`, `checkLimit`,
+`incrementUsage`, `plansGrantingFeature` and `logAudit`. No model, DTO, provider or subscription
+service was touched.
+
+| Export | Role |
+|---|---|
+| `enforcementMode()` | Reads `BILLING_ENFORCEMENT` **per call**. An unrecognised value reads as `off` — a typo must never start blocking paying customers |
+| `requireFeature(key)` | Route guard. 402 `FEATURE_NOT_IN_PLAN` + `requiredPlans[]` |
+| `requireLimit(key, countFor)` | Route guard for a live-counted limit. 402 `LIMIT_REACHED` |
+| `checkFeatureAccess` / `checkLimitAllowed` | The same checks, express-free, for the sync path and in-controller use |
+| `meterQuota` / `meterDocument` | Wraps a create in its metered quota: consumed before the write, released if the write fails |
+| `attachBillingWarning` | Warn-mode metadata, injected by wrapping `res.json` once — no controller knows |
+| `assertBusinessCreationAllowed` | `multi_business` + the `businesses` ceiling, ready for `POST /businesses` (see 15.7) |
+
+### 15.2 The three modes
+
+- **off** — never blocks, never warns. Metered creates are still **counted**, so day-one meters and
+  the rollout decision are based on real numbers.
+- **warn** — allows the action, records the overage, attaches `billingWarnings[]` to the response,
+  and writes an AuditLog row for every would-be block (`billing.feature.warned`,
+  `billing.limit.warned`, `billing.limit.overage`). This is the observation window in one flag.
+- **on** — refuses with 402 and the cheapest plans that would grant the thing, computed by scanning
+  plans. Never a hardcoded "requires Pro".
+
+Warnings ride on the existing envelope (`{ success, …, billingWarnings: [...] }`), so warn mode
+adds a field and changes no controller and no DTO.
+
+### 15.3 What is guarded
+
+| Surface | Guard |
+|---|---|
+| Expenses (all routes) | `expenses` |
+| Purchases + vendors (all routes) | `purchases` |
+| Imports — preview + commit | `data_import` + `imports_per_month` |
+| Exports — request only | `data_export` + `exports_per_month` |
+| GST returns (GSTR-1/3B) | `advanced_gst_reports` |
+| Dashboard summary | `basic_reports` (every plan grants it — declared, not enforced-in-effect) |
+| Audit log **reads** | `audit_logs`. Writing the trail never stops, whatever the plan |
+| Team — invite / re-role / status | `teams` + the `team_members` ceiling |
+| Roles — create / update | `custom_roles` |
+| Sales documents — invoice, duplicate, quotation, challan, credit note, order→invoice | `documents_per_month` |
+
+**Reads and shrinking stay open on purpose.** A downgraded business can still list its team,
+remove a member, archive a custom role and download an archive it already paid for. Taking away
+the ability to *undo* would trap people rather than upsell them.
+
+### 15.4 The sync path — §1.3 closed
+
+Route middleware never runs on `/sync/push`, so a guard written only as middleware is bypassed by
+every offline-created document. Two changes close it:
+
+1. **`feature` on the registry entry**, the subscription counterpart of the existing `permission`
+   field. `runOperation` enforces it with the very same helper the routes use, so a rejected op
+   comes back as a per-op 402 with upgrade options instead of failing the batch.
+   *(Superseded by §16.6: a feature gate on this path no longer rejects — a 402 here stranded a record
+   that already existed on the device. It warns, exactly as a limit does.)*
+2. **`offlineSync: true` and a per-op `billingWarnings` array on the sub-request.** Warnings raised
+   by one operation travel back on that operation's result and cannot leak into the other 49 —
+   asserted by a test.
+
+There is deliberately **no `meter` field**. Every metered create is metered inside its controller,
+which this path *does* run; a registry-level meter would count the same document twice, which is
+worse than not counting it.
+
+### 15.5 The offline rule (Decision 3), enforced
+
+**An already-issued document is never refused for a plan limit, in any mode.** The push path marks
+the request offline, so `meterDocument` counts it, flags the overage, and returns
+`LIMIT_EXCEEDED_OFFLINE` as a warning. Rejecting it would corrupt the number series and destroy
+trust for a billing reason. Interactive online creation still enforces the ceiling.
+
+*Widened in §16.6: the rule now covers **features** as well as limits, because the reasoning was never
+specific to limits — anything created offline already exists.*
+
+### 15.6 One real hole found and closed
+
+A **ceiling of zero** was let through once per period: with no counter row yet, the engine's
+guarded predicate `count: {$lte: -1}` matches nothing, so the upsert inserts and the first unit
+succeeds. `consumeQuota` now short-circuits a zero ceiling. Handled in the enforcement layer so the
+engine's proven atomic path is untouched. Tested.
+
+### 15.7 Not wired, and why
+
+- **`POST /businesses` does not exist** (§1.2, §6.10). `assertBusinessCreationAllowed` is written
+  and unit-reachable, but a guard mounted on an endpoint that does not exist would be a guess. The
+  `businesses` ceiling has nothing to gate until multi-business creation is built.
+- **Advanced reports beyond GST returns** — `/reports/summary` is the only report endpoint. The
+  `advanced_reports` key has no surface to guard yet.
+
+### 15.8 Files
+
+**New (2):** `src/middlewares/entitlement.js`, `tests/subscriptionEnforcement.test.js` (26)
+
+**Modified (14):** `config/env.js` (`billing.enforcement`), `modules/{expenses,purchases,imports,
+exports,gst}/routes.js`, `routes/{reportRoutes,auditRoutes,teamRoutes,roleRoutes}.js`,
+`controllers/invoiceController.js`, `controllers/teamController.js`,
+`modules/documents/controller.js`, `modules/orders/controller.js`,
+`modules/imports/controller.js`, `modules/exports/controller.js`,
+`modules/sync/{registry,service}.js`
+
+### 15.9 Breaking changes
+
+**None while `BILLING_ENFORCEMENT` is unset or `off`** — which is the shipped default. `warn` adds
+an additive `billingWarnings[]` field. `on` changes the team-seat refusal from **403
+`MEMBER_LIMIT_REACHED`** to **402 `LIMIT_REACHED`**; `off` keeps the old 403 exactly, so the one
+limit the app already enforced does not loosen.
+
+### 15.10 Before `on`
+
+**The P7 backfill must land first.** A business with no `Subscription` row falls back to the
+default plan's entitlements, so `on` would refuse Expenses to every pre-billing user — exactly the
+silent downgrade Decision 2 forbids. A test asserts this behaviour so the dependency is visible
+rather than discovered in production. Run `warn` for 1–2 weeks and read the
+`billing.*.warned` / `billing.limit.overage` audit rows before flipping.
+
+Full suite: **558 tests, 558 pass** — 26 new since P3, zero regressions.
+
+---
+
+## 16. Production stabilization sprint
+
+Not a phase. The pre-production audit (`BillJi-Subscription-Billing-PreProd-Audit.md`) found defects
+that only a running system produces: sequences of writes interrupted halfway, a provider that sends
+two events for one thing, a mode meant to observe that quietly stopped enforcing. Architecture
+unchanged; every fix is local to a file that already existed.
+
+Two of these were **reproduced against the code** before being fixed, and both reproductions are now
+permanent regression tests.
+
+### 16.1 One refund counted twice (P0)
+
+Razorpay sends `refund.created` **and** `refund.processed` for a single refund, with two different
+event ids. Dedup was keyed on the event id, so:
+
+- a ₹500 partial refund was recorded as ₹1,000 refunded (reproduced);
+- two half-refunds summed to `netAmount`, flipping the payment to `refunded` and **cancelling a
+  subscription the customer had only been half refunded for**;
+- a full refund's second event re-ran the cancellation, threw `SUBSCRIPTION_ALREADY_CANCELLED`, and
+  answered **500 forever** — so Razorpay retried a settled refund for hours (reproduced).
+
+Idempotency is now keyed on the **refund id** (`SubscriptionPayment.refundIds[]`, the same
+`$ne`-guard idiom as `webhookEventIds`). The arithmetic moved into an aggregation-pipeline update, so
+the total is computed from the stored value inside one atomic operation — reading it into JS and
+writing back a sum is the shape that produced the double-count. An already-cancelled subscription is
+treated as success: the outcome the refund wanted is the outcome that holds.
+
+### 16.2 Captured, never activated (P0)
+
+`activateFromPayment` claims `created -> captured` atomically and *then* writes the subscription. A
+restart in between takes the money, grants nothing, and — worst of all — makes every webhook retry
+return `alreadyApplied: true`.
+
+`applyCapturedPayment()` is that second half, split out so `billingReconciliation` can finish the row.
+`subscription: null` on a `captured` payment is the marker, because that field is only written after
+the plan is applied.
+
+Recovery errs towards **not** re-applying: re-running a renewal would extend the period a second time,
+a free year. It re-applies only when neither a `SubscriptionHistory` row for this payment nor a
+matching subscription applied after the payment exists; otherwise it backfills the links. Coupon
+redemption is guarded by an existing-redemption check for the same reason.
+
+A recovery that fails is the one billing state that always needs a human — a customer who paid and has
+nothing — so it audits `billing.activation.recovery_failed`. Money is never rolled back.
+
+### 16.3 Receipt numbers collided (P1)
+
+Allocation was read-max-then-add-1: two concurrent checkouts both read the same maximum and both
+received `BILLJI/2026-27/000001` (reproduced). Now allocated through **NumberSequence**, the same
+guarded `$inc` as every other series, scoped to a platform-wide sentinel business id so the existing
+unique index does the work. A partial-unique index on `receipt.number` backs it up.
+
+**Migration required before that index ships:** `scripts/migrate-receipt-sequence.mjs --fix`. If a
+duplicate already exists the index will not build and the collection silently ships without the guard.
+
+### 16.4 Duplicate orders and double-spent credit (P1)
+
+The mobile client sent no `Idempotency-Key`, so the middleware short-circuited and a double tap minted
+two payable orders. Two independent fixes, because either alone leaves a gap:
+
+- **Client:** a *stable* key per purchase attempt (terms + a 5-minute bucket). The random
+  `idempotencyKey()` helper the other endpoints use would have changed nothing.
+- **Server:** an order still open for the same terms is handed back (`resumed: true`) rather than
+  re-minted. This holds even for a client that forgets the header.
+
+A checkout carrying a proration credit while another credit-bearing order is open is refused with
+`CHECKOUT_ALREADY_OPEN`: paying both would buy one plan and spend the same unused days twice. The
+credit's basis is recorded on the payment (`proratedCredit`, `creditBasisPeriodEnd`) so activation can
+detect one that went stale anyway and audit `billing.proration.credit_stale` — money has already
+moved by then, so prevention lives at checkout and this is only the detector.
+
+### 16.5 Warn mode weakened a rule that already held (P1)
+
+`warn` let an over-cap team invite through. The seat cap is the one limit this app enforced **before
+billing existed**, so the rollout's own observation window was a seat-cap bypass. Every mode now
+refuses; only the envelope differs (`off` 403, `warn` 403 + warning + `billing.limit.warned`, `on` 402
+with upgrade options). **Warn may only ever add a warning.**
+
+### 16.6 A feature gate stranded offline records (P1)
+
+`on` mode answered 402 for an offline-created expense or purchase. The client classifies a 402 as
+non-retryable, so the operation went **`dead`** in the outbox: the record existed on the device, could
+never sync, and was lost at the next reinstall.
+
+The offline rule (Decision 3) was never specific to limits — its reasoning is that the work already
+happened. It now covers features: accepted, flagged `FEATURE_NOT_IN_PLAN_OFFLINE`, audited as
+`billing.feature.overage_offline`. Online enforcement is untouched.
+
+The trade-off, stated plainly: a modified client could push a feature the business never bought. It is
+visible in the audit log, the app never offers the screen, and it is a better bargain than deleting a
+customer's expenses to protect a paywall.
+
+### 16.7 Lapsing mid-month zeroed the allowance (P1)
+
+Usage is counted even on an unlimited plan (so the meters stay honest). A Pro business that issued
+5,000 documents in August and lapsed on the 20th therefore inherited the free plan's 200 ceiling with
+5,000 already in this month's counter: enforcement refused the very next document and kept refusing
+until the 1st. Reads as "the app is broken", not "please renew".
+
+A lapsed subscription now counts into a **separate bucket for the same month** — `periodKey` gains a
+`:f` suffix while `entitlements.source === 'fallback'`. The free ceiling governs free-plan usage, so
+free-plan usage is what it counts.
+
+Why a suffixed key and not a `baseline` field: the counter's guarded predicate
+`count: { $lte: limit - amount }` is the only reason two concurrent creates cannot both pass at
+199/200, and arithmetic against a second field would have to change it. A different key is a different
+row, so the proven atomic path is untouched. It also needs no lapse-detection job — the bucket follows
+the resolved entitlements on every call, and renewing returns to the paid bucket by itself.
+
+Only monthly limits split. An all-time metered limit (`storage_bytes`) is a stock, not a flow;
+bucketing it would hand a lapsed business a second full allowance. `source: 'none'` (pre-billing, no
+subscription) deliberately keeps the main bucket — moving it would split the very meters the rollout
+decision reads.
+
+### 16.8 Webhook amount validation (P1)
+
+The client verify path always compared the provider's amount to our order; the webhook did not.
+`amountMatchesPayment()` is now shared by both. A mismatch grants nothing, flags the row, audits
+`billing.webhook.amount_mismatch` and answers **200** — retrying cannot make the amounts agree, so a
+5xx would only buy hours of redelivery.
+
+### 16.9 The safety net
+
+`src/services/billingReconciliation.js`, on the existing scheduler (`claimJob`, so each body runs once
+per window across the fleet):
+
+| Job | Window | Does |
+|---|---|---|
+| `billing:reconcile-activations` | 5 min | Finishes captured-but-not-activated payments; alerts when it cannot |
+| `billing:activation-failures` | 1 h | Keeps flagging captured payments that need a human |
+| `billing:renewal-reminders` | 6 h | 7/3/1 days before expiry — V1 has no auto-renew, so silence meant losing access unannounced |
+| `billing:grace-reminders` | 6 h | Inside the grace window |
+
+Reminders need no "already told them?" flag: `upsertNotification` is keyed on
+`(business, notificationId)` and the period end is in the key, so an hourly sweep is a no-op and pushes
+exactly once, while next period's reminders are new rows.
+
+### 16.10 Sandbox verification
+
+`docs/razorpay-sandbox-verification.md` — env and secret separation, the migration, the preflight, the
+five webhook events to subscribe, 14 device steps (double tap, dashboard half-then-full refund, event
+redelivery, a forced crash window), and the audit actions to watch.
+`scripts/billing-preflight.mjs` fails loudly on a half-configured provider, a missing unique index
+(the engine's atomicity depends on three of them), enforcement left on, or no default plan.
+
+### 16.11 Files
+
+**New (6):** `src/services/billingReconciliation.js`, `tests/billingReconciliation.test.js`,
+`scripts/migrate-receipt-sequence.mjs`, `scripts/billing-preflight.mjs`,
+`docs/razorpay-sandbox-verification.md`, mobile `src/features/billing/__tests__/checkoutIdempotency.test.ts`
+
+**Modified (10):** `services/billingService.js`, `services/usageService.js`,
+`services/numberingService.js`, `models/SubscriptionPayment.js`, `middlewares/entitlement.js`,
+`modules/billing/webhookController.js`, `modules/sync/service.js`, `controllers/teamController.js`,
+`bootstrap/jobs.js`, mobile `api/endpoints.ts` (+ `types.ts`, `sync/pushEngine.ts` comment)
+
+### 16.12 Breaking changes
+
+No DTO field removed; `BILLING_CONTRACT_VERSION` unchanged. Three deliberate behaviour changes:
+
+1. `warn` now refuses over-cap team invites (§16.5) — it previously allowed them, which was the bug.
+2. A webhook whose amount disagrees with our order no longer activates (§16.8).
+3. A second checkout for the same terms returns the open order with `resumed: true` (§16.4).
+
+Additive: `refundIds[]`, `proratedCredit`, `creditBasisPeriodEnd` on `SubscriptionPayment`; the `:f`
+period-key bucket; the `FEATURE_NOT_IN_PLAN_OFFLINE` warning code.
+
+### 16.13 Still open
+
+- **GST receipt** — `PlansScreen` claims "Prices include GST" while `tax` is always 0 and no tax
+  invoice exists. Compliance decision (GSTIN, SAC, place-of-supply), not an engineering one. Either
+  ship the document or soften the copy before invoices go out.
+- **Locked pricing on self-serve renewal** — `quote()` prices from the plan and ignores
+  `pricing.locked`. Latent (nothing sets it); P6's admin API is what turns it on.
+- **P6 admin API, P7 backfill** — every remediation above is still a mongosh session, and `on` still
+  must not be switched on before the backfill.
+- **Never run against a real gateway or a real device.** The runbook exists precisely because tests
+  cannot close this.
+
+---
+
+# 17. Autopay — implemented (revises D9)
+
+Recurring payment by mandate (UPI Autopay / card e-mandate), offered **alongside** the one-time flow.
+Autopay is the recommended default for a new purchase; manual stays a first-class path and is never
+removed. Nothing about an existing manual subscriber changed.
+
+## 17.1 What this revises, and what it does not
+
+D9 (§2) chose Razorpay **Orders** and accepted "no auto-renew" as the consequence. §6.1 said the
+quiet part out loud: *"If auto-renew is required at launch, say so now — it changes the provider
+interface (`createMandate`/`charge`)."* This is that change.
+
+Both mechanisms now exist, because they answer different questions:
+
+| | Orders | Subscriptions |
+|---|---|---|
+| Buys | one period | a mandate + a debit schedule |
+| Used for | manual purchase, every coupon, every prorated upgrade | autopay, **list price only** |
+| Amount | fixed by the order we create | fixed by `Subscription.autopay.chargeAmount`, written at enrolment |
+
+**D9's actual requirement survives.** BillJi still owns plans, entitlements, trials, grace, and every
+period end: a `subscription.charged` event becomes a period through the *same*
+`applyCapturedPayment → applyPlan({action:'renewed'})` funnel a manual renewal uses, with no
+autopay-specific date arithmetic anywhere. What Razorpay is now allowed to own is the **cron** — plus
+the RBI pre-debit notification (`customer_notify: 1`) and debit retries, which is the reason this beats
+BillJi-scheduled token debits.
+
+## 17.2 The three invariants
+
+1. **A mandate is not money.** `subscription.authenticated` writes `autopay.status` and nothing else —
+   no period, no payment row. Only a charge grants time.
+2. **A period comes only from a charge with a payment id.** Never from a status read; `reconcileAutopayMandates`
+   alerts and re-syncs, and deliberately cannot grant.
+3. **The amount is checked against what we wrote before the debit.** `amountMatchesPayment` is *not*
+   reusable here — the cycle row is built *from* the event, so it would pass tautologically. A mismatch
+   records the money `captured` with a `failureReason` (never lost) and grants nothing (never given
+   away); the existing `reportActivationFailures` sweep surfaces it.
+
+## 17.3 Shape
+
+- **No payment row at enrolment.** Every cycle row — including the first — is created from its own
+  charge event, so cycle 1 and cycle 60 are one code path. A mandate that is never approved leaves
+  nothing behind and burns no receipt number.
+- **Dedup is the existing unique partial index on `providerRefs.paymentId`** (one provider payment per
+  debit). `providerRefs.subscriptionId` is added and is **deliberately NOT unique** — every cycle of one
+  mandate shares it, so the usual unique-partial pattern would make the *second* renewal fail to insert.
+- Rows insert with `subscription: null`, so a crash between insert and activation heals through the
+  existing 5-minute `reconcileCapturedPayments` with no changes to that job.
+- **Provider plan ids are cached on `Plan.prices[].providerRefs`**, fingerprinted
+  `razorpay:<interval>:<count>:<currency>:<amount>`. A provider plan is immutable, so the amount is part
+  of the key and a repriced plan simply misses the cache. Nothing invalidates: mandates already running
+  still reference the old provider plan, and the provider owns that link.
+- **`resolveStatus` is untouched and `past_due` stays unused.** A failed debit is already classified
+  correctly by dates (inside period → `active`, past it → `in_grace` → `expired`). Returning `past_due`
+  would either grant access past grace or duplicate `in_grace`. Dunning lives in `autopay.status`, which
+  the DTO exposes separately — clients must not gate features on it.
+- **Cancelling stops the mandate FIRST, and strictly** (`billingService.cancelWithProvider`). If the
+  provider will not confirm, nothing is cancelled locally: a cancelled subscription with a live mandate
+  keeps debiting someone who cancelled. `applyRefund`'s full-refund branch routes through the same
+  function, so both refund entry points became mandate-aware without a new import.
+- `POST /billing/autopay/off` stops the mandate and touches nothing else — the period, plan and
+  `cancel.*` are left alone, and the manual renewal reminders resume by themselves.
+- Renewal reminders **skip** a working mandate rather than rewriting their copy: every failure state
+  clears `autopay.enabled`, so those subscribers fall back into the existing reminder, where
+  "Nothing is charged automatically" is true again.
+
+## 17.4 Files
+
+New: `src/services/autopayService.js` (lifecycle + `recordAutopayCharge` + `confirmAutopayMandate`),
+`tests/billingAutopay*.test.js` (43 cases), `mobile/src/features/billing/checkoutBridge.ts`.
+Changed: `payments/index.js` (+`supportsAutopay`, `getAutopayProvider`), `razorpayProvider.js`
+(+5 mandate methods, `subscription.*` parsing, and a `PROVIDER_UNAUTHORIZED` branch — a 401 carries a
+bare string, not Razorpay's usual `{error:{description}}`, so it used to surface as a reasonless 502),
+`Subscription.autopay.*`, `SubscriptionPayment.providerRefs.subscriptionId`, `billingService`
+(enrolment + `cancelWithProvider` + `disableAutopay`), `webhookController` (one early branch),
+`billingReconciliation` (+2 sweeps), `billingDto` (additive `autopay` block — contract stays v1),
+`notificationTypes.js` (also fixes `subscription-renewal`/`subscription-grace` never having been
+mutable).
+
+## 17.5 Still open
+
+- **The Razorpay account does not have Subscriptions enabled.** The same sandbox key returns 200 on
+  `POST /orders` and **401 on `/plans` and `/subscriptions`** — Subscriptions is a separate activation.
+  Every autopay path is therefore stub-verified only; enable the product, then run the autopay live
+  script and the device pass.
+- **`total_count`** is 120 monthly / 10 yearly (`AUTOPAY_TOTAL_COUNT`). Decides what happens in year N
+  and what the customer is told — product should confirm.
+- **A live mandate cannot be repriced.** Current behaviour grandfathers it forever
+  (`autopay.chargeAmount` is authoritative). Confirm that is the revenue policy.
+- **UPI Autopay's ₹15,000 per-debit AFA threshold** is not binding today (Pro yearly is ₹1,999), but any
+  plan above it makes "debited automatically" false for that cohort.
+- **Mandate consent copy** is drafted, not legally approved — in particular whether it must name the
+  entity the bank's own SMS will show.
+- **GST on a recurring charge.** `tax` is still 0 and no tax invoice exists (§16.13); autopay makes that
+  gap 12× more frequent per customer.
+- **`alreadyApplied()` errs toward "already applied"**, so a lost history row on a *renewal* can leave a
+  paid cycle un-extended. Pre-existing on the manual path; autopay makes it 12× more likely. Fix: for
+  `kind:'renewal'`, trust only the direct `SubscriptionHistory.metadata.paymentId` signal.

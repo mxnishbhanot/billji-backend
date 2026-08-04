@@ -9,10 +9,24 @@ import { ApiError } from '../../utils/ApiError.js';
 // format is visible in the file. It also keeps the provider abstraction honest — a second
 // provider is another file of the same shape, not another vendor SDK to learn.
 //
-// Razorpay ORDERS, not Razorpay Subscriptions (approved Decision 1 / D9): Subscriptions would put
-// the billing cycle, plan ids and renewal dates inside Razorpay, which is the opposite of the
-// requirement that BillJi owns all business logic. BillJi creates an order for an amount it
-// computed and sets its own period end.
+// TWO mechanisms, deliberately, because they answer different questions:
+//
+//   Orders        — one-time payment. The money path for every manual purchase, every coupon and
+//                   every prorated upgrade: BillJi computes an amount and asks for exactly that.
+//   Subscriptions — the MANDATE path (UPI Autopay / card e-mandate), list price only. Razorpay
+//                   holds the mandate, sends the RBI pre-debit notification, retries a failed
+//                   debit, and tells us `subscription.charged` when money actually moved.
+//
+// This revises Decision 1 / D9, which originally chose Orders alone and accepted "no auto-renew" as
+// the consequence (docs §6.1 said out loud: if auto-renew is required, say so — it changes this
+// interface). It does not reverse D9's actual requirement. BillJi still owns plans, entitlements,
+// trials, grace and — critically — every period end: a `charged` event is turned into a period by
+// the same applyCapturedPayment -> applyPlan funnel a manual renewal uses. What Razorpay is now
+// allowed to own is the CRON, not the business logic.
+//
+// Recurring amounts are never read from an event. The amount the customer authorised is written to
+// `Subscription.autopay.chargeAmount` at enrolment, before any debit, and a charge that disagrees
+// with it grants nothing (see services/autopayService.js).
 
 const AUTH = () => `Basic ${Buffer.from(`${env.razorpay.keyId}:${env.razorpay.keySecret}`).toString('base64')}`;
 
@@ -39,6 +53,18 @@ const call = async (path, { method = 'GET', body } = {}) => {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
+    // 401/403 does not carry Razorpay's usual { error: { description } } — a plain
+    // `{"error":"Unauthorized"}` — so it would otherwise surface as a reasonless 502. It has one of two
+    // causes and both are deployment facts, not customer errors: wrong credentials, or an account
+    // without that product enabled. Subscriptions (autopay) is a separate activation from Orders, so a
+    // key that takes one-time payments happily can still 401 on /plans and /subscriptions.
+    if (response.status === 401 || response.status === 403) {
+      throw new ApiError(502, 'Online payments are not available right now', {
+        code: 'PROVIDER_UNAUTHORIZED',
+        providerReason: `Razorpay refused ${method} ${path} (${response.status}). Check the API key, and that this account has the required product enabled.`
+      });
+    }
+
     const description = payload?.error?.description || 'Payment provider rejected the request';
     // Razorpay's own message is safe to surface — it is written for end users ("card declined").
     throw new ApiError(response.status === 400 ? 400 : 502, description, {
@@ -60,8 +86,14 @@ const timingSafeEqual = (a, b) => {
 
 const hmac = (payload, secret) => crypto.createHmac('sha256', secret).update(payload).digest('hex');
 
+// Razorpay's own vocabulary for a billing period. BillJi's intervals are the source of truth; this
+// map is the only place the two meet.
+const RAZORPAY_PERIOD = { month: 'monthly', year: 'yearly' };
+
 export const razorpayProvider = {
   name: 'razorpay',
+
+  supportsAutopay: true,
 
   isConfigured: () => Boolean(env.razorpay.keyId && env.razorpay.keySecret),
 
@@ -98,6 +130,102 @@ export const razorpayProvider = {
   verifyPaymentSignature: ({ orderId, paymentId, signature }) =>
     timingSafeEqual(hmac(`${orderId}|${paymentId}`, env.razorpay.keySecret), signature),
 
+  // ---------------------------------------------------------------------------
+  // Autopay: mandate lifecycle
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A Razorpay plan for one (interval, amount) pair.
+   *
+   * Razorpay plans are IMMUTABLE — there is no update endpoint. A price change therefore needs a new
+   * plan, which is why the caller keys its cache on the amount rather than the interval alone
+   * (billingService.providerPlanKey). Nothing here invalidates: mandates already running still point
+   * at the old plan, and Razorpay owns that link.
+   */
+  ensureProviderPlan: async ({ name, amount, currency = 'INR', interval, intervalCount = 1 }) => {
+    const period = RAZORPAY_PERIOD[interval];
+    if (!period) {
+      // Not an ApiError: a caller asking for a lifetime/custom mandate is our bug, not a user's.
+      throw new Error(`Razorpay has no recurring period for interval "${interval}"`);
+    }
+
+    const plan = await call('/plans', {
+      method: 'POST',
+      body: { period, interval: intervalCount, item: { name, amount, currency } }
+    });
+
+    return { providerPlanId: plan.id, raw: plan };
+  },
+
+  /**
+   * Creates the mandate request. The customer still has to authenticate it — this returns a
+   * subscription in `created`, and `subscription.authenticated` is what says the bank agreed.
+   *
+   * `customer_notify: 1` puts the RBI-mandated pre-debit notification on Razorpay, which is the
+   * whole reason this path exists instead of BillJi-scheduled token debits.
+   *
+   * No `max_amount`: Razorpay's default ceiling is the plan amount, so the figure disclosed to the
+   * customer at consent IS their plan price. No custom headroom means nothing extra to disclose.
+   */
+  createSubscription: async ({ providerPlanId, totalCount, notes = {} }) => {
+    const subscription = await call('/subscriptions', {
+      method: 'POST',
+      body: {
+        plan_id: providerPlanId,
+        total_count: totalCount,
+        quantity: 1,
+        customer_notify: 1,
+        notes
+      }
+    });
+
+    return {
+      providerSubscriptionId: subscription.id,
+      status: subscription.status,
+      // Absent until the mandate authenticates; mirrored when it shows up.
+      customerId: subscription.customer_id || '',
+      raw: subscription
+    };
+  },
+
+  /** Read-back for the reconciliation job. Never used to grant a period — only to detect drift. */
+  fetchSubscription: async (providerSubscriptionId) => {
+    const subscription = await call(`/subscriptions/${encodeURIComponent(providerSubscriptionId)}`);
+    return {
+      subscriptionId: subscription.id,
+      status: subscription.status,
+      currentEnd: subscription.current_end ? new Date(subscription.current_end * 1000) : null,
+      chargeAt: subscription.charge_at ? new Date(subscription.charge_at * 1000) : null,
+      paidCount: subscription.paid_count ?? 0,
+      customerId: subscription.customer_id || '',
+      raw: subscription
+    };
+  },
+
+  /**
+   * Stops the mandate. `atCycleEnd` leaves the period the customer already paid for intact — which
+   * is what BillJi's own cancellation does, so the two agree by default.
+   */
+  cancelProviderSubscription: async ({ providerSubscriptionId, atCycleEnd = true }) => {
+    const subscription = await call(`/subscriptions/${encodeURIComponent(providerSubscriptionId)}/cancel`, {
+      method: 'POST',
+      body: { cancel_at_cycle_end: atCycleEnd ? 1 : 0 }
+    });
+
+    return { status: subscription.status, raw: subscription };
+  },
+
+  /**
+   * The mandate-authentication signature.
+   *
+   * NOTE THE OPERAND ORDER: `payment_id|subscription_id`, the REVERSE of the one-time flow's
+   * `order_id|payment_id`. This is a separate function rather than a flag on
+   * verifyPaymentSignature precisely because getting that order wrong is a signature bypass that
+   * still looks like it validates.
+   */
+  verifyMandateSignature: ({ subscriptionId, paymentId, signature }) =>
+    timingSafeEqual(hmac(`${paymentId}|${subscriptionId}`, env.razorpay.keySecret), signature),
+
   fetchPayment: async (paymentId) => {
     const payment = await call(`/payments/${encodeURIComponent(paymentId)}`);
     return {
@@ -108,6 +236,9 @@ export const razorpayProvider = {
       currency: payment.currency,
       captured: payment.status === 'captured',
       method: payment.method,
+      // Set on a recurring debit; '' for a one-time payment. Lets a mandate confirmation check that
+      // the payment it was handed really belongs to that mandate.
+      subscriptionId: payment.subscription_id || '',
       raw: payment
     };
   },
@@ -146,10 +277,16 @@ export const razorpayProvider = {
     const payment = payload?.payload?.payment?.entity || null;
     const refund = payload?.payload?.refund?.entity || null;
     const order = payload?.payload?.order?.entity || null;
+    // Present on every subscription.* event. `subscription.charged` carries BOTH this and a payment
+    // entity, which is why the payment/amount extraction below needs no autopay special case.
+    const subscription = payload?.payload?.subscription?.entity || null;
+    const unix = (seconds) => (seconds ? new Date(seconds * 1000) : null);
 
     return {
       // Razorpay's own delivery id. Redeliveries repeat it, which is what makes dedup possible.
-      eventId: headers['x-razorpay-event-id'] || `${payload.event}:${payment?.id || refund?.id || order?.id || ''}`,
+      eventId:
+        headers['x-razorpay-event-id'] ||
+        `${payload.event}:${payment?.id || refund?.id || order?.id || subscription?.id || ''}`,
       event: payload.event,
       paymentId: payment?.id || refund?.payment_id || '',
       orderId: payment?.order_id || order?.id || '',
@@ -157,6 +294,13 @@ export const razorpayProvider = {
       amount: refund?.amount ?? payment?.amount ?? null,
       status: payment?.status || refund?.status || '',
       failureReason: payment?.error_description || '',
+      // Autopay. `subscriptionStatus` is Razorpay's word for the mandate state; autopayService maps it
+      // to BillJi's own vocabulary rather than storing it raw.
+      subscriptionId: subscription?.id || payment?.subscription_id || '',
+      subscriptionStatus: subscription?.status || '',
+      subscriptionCurrentEnd: unix(subscription?.current_end),
+      subscriptionChargeAt: unix(subscription?.charge_at),
+      subscriptionEntity: subscription,
       raw: payload
     };
   }

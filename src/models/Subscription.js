@@ -82,9 +82,49 @@ const subscriptionSchema = new mongoose.Schema(
     provider: {
       name: { type: String, default: '', trim: true, maxlength: 40 },
       customerId: { type: String, default: '', trim: true, maxlength: 160 },
+      // The provider-side recurring subscription (Razorpay `sub_…`) that holds the mandate. This is
+      // how an incoming subscription.* webhook finds its way back to a business.
       subscriptionId: { type: String, default: '', trim: true, maxlength: 160 },
-      // Reserved for UPI Autopay / card mandates when auto-renewal lands. V1 is manual renewal.
+      // The bank/UPI mandate or card token behind it, when the provider reports one. Display and
+      // support only — never a decision input.
       mandateId: { type: String, default: '', trim: true, maxlength: 160 }
+    },
+
+    /**
+     * Autopay (UPI Autopay / card e-mandate) mirror.
+     *
+     * Everything here is BillJi's own vocabulary and BillJi's own copy of what the provider told us.
+     * Two rules that the whole feature depends on:
+     *
+     * 1. **A mandate is not money.** `enabled`/`status` never affect entitlements. Access is decided
+     *    by currentPeriodEnd/graceEndsAt exactly as it is for a manual subscriber, so a failed debit
+     *    cannot cut a paying customer off early and a live mandate cannot grant time nobody paid for.
+     * 2. **`chargeAmount` is written at enrolment, before any debit.** It is the pre-agreed amount a
+     *    recurring charge is checked against — the recurring equivalent of an order fixing its own
+     *    amount. Never re-derive it from an event; that is what an attacker (or a mis-priced plan)
+     *    would control.
+     */
+    autopay: {
+      enabled: { type: Boolean, default: false },
+      status: {
+        type: String,
+        enum: ['none', 'pending', 'authenticated', 'active', 'halted', 'cancelled', 'completed'],
+        default: 'none'
+      },
+      // What the mandate was set up to buy. The webhook-created cycle row has no client request to
+      // read these from, and must never read them from the event.
+      planKey: { type: String, default: '', trim: true, lowercase: true, maxlength: 60 },
+      interval: { type: String, default: '', trim: true, maxlength: 10 },
+      chargeAmount: paise,
+      currency: { type: String, default: CURRENCY, uppercase: true, trim: true, maxlength: 3 },
+      // The billingService price fingerprint this mandate was minted against, for support: it says
+      // which provider plan (and therefore which price) the customer actually authorised.
+      providerPlanKey: { type: String, default: '', trim: true, maxlength: 160 },
+      authenticatedAt: { type: Date, default: null },
+      nextDebitAt: { type: Date, default: null },
+      lastChargedAt: { type: Date, default: null },
+      cancelledAt: { type: Date, default: null },
+      failureCount: { type: Number, default: 0, min: 0 }
     },
 
     // Schema only — no add-on service or routes exist. Present so selling extra businesses,
@@ -126,6 +166,16 @@ const subscriptionSchema = new mongoose.Schema(
 subscriptionSchema.index({ status: 1, currentPeriodEnd: 1 });
 subscriptionSchema.index({ planKey: 1, status: 1 });
 subscriptionSchema.index({ 'trial.endsAt': 1 }, { sparse: true });
+
+// How a subscription.* webhook finds its business. NOT unique: uniqueness buys nothing for a lookup
+// and could only make a legitimate re-enrolment fail to save. Partial rather than sparse because the
+// field defaults to '' — the same reasoning as SubscriptionPayment's provider-ref indexes.
+subscriptionSchema.index(
+  { 'provider.subscriptionId': 1 },
+  { partialFilterExpression: { 'provider.subscriptionId': { $gt: '' } } }
+);
+// The upcoming-debit notice and the stalled-mandate reconciliation both scan this.
+subscriptionSchema.index({ 'autopay.enabled': 1, 'autopay.nextDebitAt': 1 });
 
 subscriptionSchema.pre('validate', function validateEntitlementKeys(next) {
   try {

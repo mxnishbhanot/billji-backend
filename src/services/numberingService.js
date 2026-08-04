@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import NumberSequence from '../models/NumberSequence.js';
 import { ApiError } from '../utils/ApiError.js';
 
@@ -194,4 +195,37 @@ export const previewDocumentNumber = async ({ business, documentType = 'invoice'
   const sequence = await NumberSequence.findOne({ business: business._id, documentType, financialYear }).lean();
 
   return formatDocumentNumber({ prefix, financialYear, sequence: (sequence?.current || 0) + 1 });
+};
+
+// -- Platform sequences ----------------------------------------------------------------
+//
+// BillJi's OWN documents (today: subscription receipts) are numbered per financial year across
+// the whole platform, not per business. Same allocator as every other series — one guarded
+// `$inc` on NumberSequence — because the read-max-then-add-1 it replaced handed two concurrent
+// checkouts the identical receipt number.
+//
+// The zero ObjectId stands in for "the platform" so the existing unique index on
+// (business, documentType, financialYear) does the work unchanged. No new collection, no new
+// allocator, nothing per-business to migrate.
+export const PLATFORM_SCOPE_ID = new mongoose.Types.ObjectId('000000000000000000000000');
+
+/**
+ * Claims the next position in a platform-wide series. Atomic: the `$inc` is the allocation, so
+ * concurrent callers can never receive the same number.
+ *
+ * @returns {Promise<{sequence:number, prefix:string, financialYear:string}>}
+ */
+export const nextPlatformSequence = async ({ documentType, prefix, date = new Date(), session } = {}) => {
+  const financialYear = financialYearFor(date);
+  const row = await NumberSequence.findOneAndUpdate(
+    { business: PLATFORM_SCOPE_ID, documentType, financialYear },
+    {
+      $setOnInsert: { business: PLATFORM_SCOPE_ID, documentType, financialYear },
+      $set: { prefix },
+      $inc: { current: 1 }
+    },
+    { new: true, upsert: true, session }
+  );
+
+  return { sequence: row.current, prefix: row.prefix, financialYear: row.financialYear };
 };

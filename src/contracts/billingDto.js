@@ -85,6 +85,28 @@ export const subscriptionDto = ({ access, usage = [], plan = null }) => {
     inGracePeriod: Boolean(access?.inGrace),
     cancelAtPeriodEnd: cancelPending,
 
+    /**
+     * Autopay, in BillJi's own vocabulary — never the provider's, and never any provider id.
+     *
+     * `status` is a dunning signal, NOT an access signal: `subscriptionStatus` above is still the only
+     * thing that says what the business may use. A halted mandate on a paid-up period is
+     * `subscriptionStatus: 'active'` with `autopay.status: 'halted'`, and a client must not gate
+     * features on the second.
+     *
+     * `nextDebitAt` is not the same instant as `renewalDate`: the provider debits at (or just before)
+     * the cycle end, and the client should show the debit date when autopay is on.
+     */
+    autopay: {
+      enabled: Boolean(subscription?.autopay?.enabled),
+      status: subscription?.autopay?.status || 'none',
+      nextDebitAt: iso(subscription?.autopay?.nextDebitAt),
+      lastChargedAt: iso(subscription?.autopay?.lastChargedAt),
+      // What the customer authorised, in paise. This is the figure disclosed at consent, because the
+      // mandate ceiling is the plan price — there is no hidden headroom.
+      amount: subscription?.autopay?.chargeAmount || null,
+      currency: subscription?.autopay?.currency || null
+    },
+
     // The resolved entitlements: snapshot + add-on grants + overrides, already merged. This is
     // what the client gates UI on, and what the server re-checks on every request regardless.
     features: { ...(access?.entitlements?.features || {}) },
@@ -119,6 +141,9 @@ export const paymentDto = (payment) => ({
   refundedAmount: payment.refundedAmount || 0,
   refundedAt: iso(payment.refundedAt),
   receiptNumber: payment.receipt?.number || '',
+  // Was this cycle taken by a mandate rather than approved by hand? One boolean, derived from the
+  // provider ref, so the receipt line can say "Auto-paid" without exposing the mandate id.
+  autopay: Boolean(payment.providerRefs?.subscriptionId),
   // Which processor took it, for the customer's own records. No provider ids.
   method: payment.provider,
   // Only while the payment is still standing. Once refunded, `updatedAt` is the refund's timestamp,
@@ -135,7 +160,7 @@ const publicLimits = (limits = {}) =>
  * A plan on the pricing screen. Prices are integer paise — the client formats them; sending a
  * pre-formatted string would bake currency and locale decisions into the API.
  */
-export const planDto = (plan, { currentPlanId = null } = {}) => ({
+export const planDto = (plan, { currentPlanId = null, autopayEnabled = false } = {}) => ({
   planId: String(plan._id),
   planKey: plan.key,
   name: plan.name,
@@ -153,7 +178,11 @@ export const planDto = (plan, { currentPlanId = null } = {}) => ({
       intervalCount: price.intervalCount,
       currency: price.currency,
       amount: price.amount,
-      compareAtAmount: price.compareAtAmount || null
+      compareAtAmount: price.compareAtAmount || null,
+      // Whether this price can be bought on a mandate. Passed in rather than derived here: this
+      // module must not import the provider registry, or a serialiser starts depending on deployment
+      // configuration. Only monthly/yearly are recurring at the provider.
+      autopayAvailable: autopayEnabled && ['month', 'year'].includes(price.interval)
     })),
   features: Object.fromEntries(plan.features || []),
   limits: publicLimits(Object.fromEntries(plan.limits || [])),

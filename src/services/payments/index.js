@@ -19,8 +19,23 @@ import razorpayProvider from './razorpayProvider.js';
 //   refund({paymentId, amount, notes})              -> {refundId, amount, status, raw}
 //   parseWebhook({rawBody, headers})                -> verified event, or throws
 //
-// Not in the interface, deliberately: anything about plans, periods, entitlements, trials or
-// renewals. A provider confirms money moved. That is the whole job.
+// Autopay (recurring mandate) additions. Only providers with `supportsAutopay: true` implement
+// these; the others must LEAVE THEM UNDEFINED rather than stub them, so a caller that skipped the
+// capability gate fails loudly instead of on a swallowed 400:
+//   supportsAutopay          boolean
+//   ensureProviderPlan({name, amount, currency, interval, intervalCount}) -> {providerPlanId, raw}
+//   createSubscription({providerPlanId, totalCount, notes})  -> {providerSubscriptionId, status, customerId, raw}
+//   fetchSubscription(providerSubscriptionId)                -> {subscriptionId, status, currentEnd, chargeAt, paidCount, raw}
+//   cancelProviderSubscription({providerSubscriptionId, atCycleEnd}) -> {status, raw}
+//   verifyMandateSignature({subscriptionId, paymentId, signature}) -> boolean
+//
+// A provider may own a debit SCHEDULE; it never owns a PERIOD. `createSubscription` buys a mandate
+// and a clock — nothing more. BillJi still computes every date it honours in
+// subscriptionService.applyPlan, still writes its own payment row per cycle, and still allocates its
+// own receipt numbers. subscriptionService imports no provider, and that must stay true.
+//
+// Not in the interface, deliberately: plans-as-entitlements, periods, trials, grace. A provider
+// confirms money moved, and (for autopay) when it intends to move next.
 
 const PROVIDERS = new Map([
   [razorpayProvider.name, razorpayProvider],
@@ -40,6 +55,24 @@ export const getProvider = (name = DEFAULT_PROVIDER) => {
     // point — a half-configured processor must never fall through to a "free" activation.
     throw new ApiError(503, 'Online payments are not available right now', {
       code: 'PROVIDER_NOT_CONFIGURED',
+      provider: name
+    });
+  }
+  return provider;
+};
+
+/**
+ * Same as getProvider, plus the autopay capability check.
+ *
+ * A separate flag rather than `typeof provider.createSubscription === 'function'`: the flag reads as
+ * a decision, duck-typing reads as an accident and would start answering `true` the day someone
+ * lands a half-finished method.
+ */
+export const getAutopayProvider = (name = DEFAULT_PROVIDER) => {
+  const provider = getProvider(name);
+  if (!provider.supportsAutopay) {
+    throw new ApiError(400, 'That payment method cannot set up automatic payments', {
+      code: 'PROVIDER_NO_AUTOPAY',
       provider: name
     });
   }

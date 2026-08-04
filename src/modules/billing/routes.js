@@ -12,6 +12,7 @@ import {
   reactivate,
   startCheckout,
   trialRules,
+  turnOffAutopay,
   verifyRules
 } from './checkoutController.js';
 import { getPlans, getSubscription, getUsage } from './controller.js';
@@ -43,5 +44,8 @@ router.post('/coupons/preview', canView, couponRules, validate, previewCoupon);
 router.post('/trial', canManage, trialRules, validate, beginTrial);
 router.post('/cancel', canManage, cancelRules, validate, cancel);
 router.post('/reactivate', canManage, reactivate);
+// Stops the mandate without ending the subscription. No body, and no idempotency wrapper: turning
+// autopay off twice is naturally a no-op. Same permission as buying — it is the same money decision.
+router.post('/autopay/off', canManage, turnOffAutopay);
 
 export default router;

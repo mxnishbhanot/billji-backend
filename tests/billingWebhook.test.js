@@ -181,8 +181,9 @@ describe('activation via webhook', () => {
     const { token, business } = await seeded();
     const { orderId } = await openCheckout(token);
 
-    // The event lies about the amount; the row we wrote at checkout is what counts.
-    await postWebhook(capturedEvent({ orderId, businessId: business._id, amount: 1 }));
+    // The event carries no plan, no period and no entitlements — everything below comes from the row
+    // we wrote at checkout. (The amount must agree: a mismatch is refused, see the amount test below.)
+    await postWebhook(capturedEvent({ orderId, businessId: business._id }));
 
     const subscription = await Subscription.findOne({ business: business._id });
     assert.equal(subscription.planKey, 'pro');
@@ -330,6 +331,93 @@ describe('failures and refunds', () => {
 
     assert.equal(again.body.duplicate, true);
     assert.equal((await SubscriptionPayment.findOne({ business: business._id })).refundedAmount, 50000);
+  });
+
+  // REGRESSION (audit P0-1). Razorpay sends refund.created AND refund.processed for ONE refund, with
+  // two different event ids. Dedup used to be keyed on the event id, so a single ₹500 refund was
+  // recorded as ₹1000 — and two half-refunds summed to the full amount, which cancelled a
+  // subscription the customer had only been half refunded for.
+  it('counts one refund once even though the provider sends two events for it', async () => {
+    const { token, business } = await seeded();
+    const { orderId } = await openCheckout(token);
+    await postWebhook(capturedEvent({ orderId, businessId: business._id }), { eventId: 'evt_cap' });
+
+    const entity = { id: 'rfnd_PAIR', payment_id: 'pay_TEST1', amount: 50000, status: 'processed' };
+    const created = await postWebhook({ event: 'refund.created', payload: { refund: { entity } } }, { eventId: 'evt_rc' });
+    const processed = await postWebhook({ event: 'refund.processed', payload: { refund: { entity } } }, { eventId: 'evt_rp' });
+
+    assert.equal(created.status, 200, created.text);
+    assert.equal(processed.status, 200, processed.text);
+
+    const payment = await SubscriptionPayment.findOne({ business: business._id });
+    assert.equal(payment.refundedAmount, 50000, 'one ₹500 refund is ₹500 refunded, not ₹1000');
+    assert.equal(payment.status, 'partially_refunded');
+    // The refund is claimed exactly once. The second event's id is deliberately NOT recorded: it
+    // changed nothing, and a redelivery of it is deduped by the refund id regardless.
+    assert.deepEqual([...payment.refundIds], ['rfnd_PAIR']);
+    assert.ok(payment.webhookEventIds.includes('evt_rc'));
+    // A partial refund must not end the period.
+    assert.equal((await Subscription.findOne({ business: business._id })).cancel.effectiveAt, null);
+  });
+
+  // REGRESSION (audit P0-2). The second lifecycle event of a FULL refund re-ran the cancellation,
+  // which threw SUBSCRIPTION_ALREADY_CANCELLED and made the webhook answer 500 — so Razorpay retried
+  // a settled refund for hours.
+  it('acknowledges the second event of a full refund instead of failing forever', async () => {
+    const { token, business } = await seeded();
+    const { orderId } = await openCheckout(token);
+    await postWebhook(capturedEvent({ orderId, businessId: business._id }), { eventId: 'evt_cap' });
+
+    const entity = { id: 'rfnd_FULL', payment_id: 'pay_TEST1', amount: 199900, status: 'processed' };
+    const created = await postWebhook({ event: 'refund.created', payload: { refund: { entity } } }, { eventId: 'evt_fc' });
+    const processed = await postWebhook({ event: 'refund.processed', payload: { refund: { entity } } }, { eventId: 'evt_fp' });
+
+    assert.equal(created.status, 200, created.text);
+    assert.equal(processed.status, 200, processed.text);
+
+    const payment = await SubscriptionPayment.findOne({ business: business._id });
+    assert.equal(payment.refundedAmount, 199900);
+    assert.equal(payment.status, 'refunded');
+    // Still exactly one cancellation, from the first event.
+    const subscription = await Subscription.findOne({ business: business._id });
+    assert.ok(subscription.cancel.effectiveAt, 'a fully refunded period is ended');
+  });
+
+  it('never refunds past the captured amount, however many events arrive', async () => {
+    const { token, business } = await seeded();
+    const { orderId } = await openCheckout(token);
+    await postWebhook(capturedEvent({ orderId, businessId: business._id }), { eventId: 'evt_cap' });
+
+    for (const [index, amount] of [150000, 150000].entries()) {
+      await postWebhook(
+        {
+          event: 'refund.processed',
+          payload: { refund: { entity: { id: `rfnd_CAP${index}`, payment_id: 'pay_TEST1', amount, status: 'processed' } } }
+        },
+        { eventId: `evt_cap${index}` }
+      );
+    }
+
+    const payment = await SubscriptionPayment.findOne({ business: business._id });
+    assert.equal(payment.refundedAmount, 199900, 'clamped to what was actually captured');
+    assert.equal(payment.status, 'refunded');
+  });
+
+  // REGRESSION (audit P1-6). The client verify path always checked the amount; this path did not.
+  it('refuses to activate when the event amount does not match our order', async () => {
+    const { token, business } = await seeded();
+    const { orderId } = await openCheckout(token);
+
+    const response = await postWebhook(capturedEvent({ orderId, businessId: business._id, amount: 1 }));
+
+    // Acknowledged — retrying cannot make the amounts agree — but nothing granted.
+    assert.equal(response.status, 200, response.text);
+    assert.equal(response.body.amountMismatch, true);
+    assert.equal((await Subscription.findOne({ business: business._id })).planKey, 'starter');
+
+    const payment = await SubscriptionPayment.findOne({ business: business._id });
+    assert.equal(payment.status, 'created', 'an unexplained amount grants nothing');
+    assert.match(payment.failureReason, /does not match/);
   });
 
   it('applies a capture and a later refund to the same payment — one field could not', async () => {

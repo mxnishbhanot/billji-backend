@@ -8,6 +8,7 @@ import Plan from '../src/models/Plan.js';
 import Subscription from '../src/models/Subscription.js';
 import SubscriptionHistory from '../src/models/SubscriptionHistory.js';
 import SubscriptionPayment from '../src/models/SubscriptionPayment.js';
+import { nextReceiptNumber } from '../src/services/billingService.js';
 import { clearPlanCache } from '../src/services/entitlementService.js';
 import { applyPlan, ensureSubscription, resolveStatus } from '../src/services/subscriptionService.js';
 import { useMongoTestDb } from './helpers/db.js';
@@ -162,6 +163,78 @@ describe('checkout order creation', () => {
       1,
       'a double tap must not open two orders the customer could pay twice'
     );
+  });
+});
+
+// REGRESSION (audit P1-1 / P1-5). The mobile client sent no Idempotency-Key, so the middleware
+// short-circuited and a double tap minted two payable orders. The server now refuses to open a second
+// order for the same terms on its own — the client header is defence in depth, not the only defence.
+describe('duplicate checkout protection', () => {
+  it('hands back the order already open for the same plan instead of minting a second one', async () => {
+    const { token, business } = await seeded();
+
+    const first = await checkout(token, { planKey: 'pro', interval: 'year' });
+    const second = await checkout(token, { planKey: 'pro', interval: 'year' });
+
+    assert.equal(second.status, 201, second.text);
+    assert.equal(second.body.checkout.orderId, first.body.checkout.orderId);
+    assert.equal(second.body.checkout.paymentId, first.body.checkout.paymentId);
+    assert.equal(second.body.checkout.resumed, true);
+    assert.equal(await SubscriptionPayment.countDocuments({ business: business._id }), 1, 'one order, not two');
+  });
+
+  it('still opens a fresh order once the open one has aged out', async () => {
+    const { token, business } = await seeded();
+    await checkout(token, { planKey: 'pro', interval: 'year' });
+
+    // Through the driver: Mongoose marks `createdAt` immutable, so a model-level $set is dropped.
+    await SubscriptionPayment.collection.updateOne(
+      { business: business._id },
+      { $set: { createdAt: new Date(Date.now() - 30 * 60 * 1000) } }
+    );
+    razorpay.state.orderId = 'order_LATER';
+
+    const later = await checkout(token, { planKey: 'pro', interval: 'year' });
+    assert.equal(later.status, 201, later.text);
+    assert.equal(later.body.checkout.orderId, 'order_LATER');
+    assert.equal(await SubscriptionPayment.countDocuments({ business: business._id }), 2);
+  });
+
+  it('refuses to price the same unused days into a second, different purchase', async () => {
+    const { token, business } = await seeded();
+    const pro = await Plan.findOne({ key: 'pro' });
+    // A running paid period is what makes a proration credit exist at all.
+    await applyPlan({ business: business._id, plan: pro, interval: 'year', amount: 199900, action: 'activated' });
+
+    const yearly = await checkout(token, { planKey: 'business', interval: 'year' });
+    assert.equal(yearly.status, 201, yearly.text);
+    assert.ok(yearly.body.checkout.breakdown.proratedCredit > 0, 'this checkout carries a credit');
+
+    // Different terms, so not the resume path — but the same unused days would be credited again, and
+    // paying both would buy one plan while spending the credit twice.
+    razorpay.state.orderId = 'order_SECOND';
+    const monthly = await checkout(token, { planKey: 'business', interval: 'month' });
+
+    assert.equal(monthly.status, 409, monthly.text);
+    assert.equal(monthly.body.details.code, 'CHECKOUT_ALREADY_OPEN');
+  });
+
+  it('records what the credit was priced against, so a stale one is detectable', async () => {
+    const { token, business } = await seeded();
+    const pro = await Plan.findOne({ key: 'pro' });
+    const subscription = await applyPlan({
+      business: business._id,
+      plan: pro,
+      interval: 'year',
+      amount: 199900,
+      action: 'activated'
+    });
+
+    await checkout(token, { planKey: 'business', interval: 'year' });
+
+    const payment = await SubscriptionPayment.findOne({ business: business._id, planKey: 'business' });
+    assert.ok(payment.proratedCredit > 0);
+    assert.equal(payment.creditBasisPeriodEnd.getTime(), subscription.currentPeriodEnd.getTime());
   });
 });
 
@@ -628,6 +701,41 @@ describe('payment history', () => {
     for (const leaked of ['providerRefs', 'raw', 'webhookEventIds', 'failureReason', '_id', 'business']) {
       assert.ok(!(leaked in body.payments[0]), `payment DTO leaks ${leaked}`);
     }
+  });
+
+  // REGRESSION (audit P1-2). Receipt numbers were allocated by reading the current maximum and adding
+  // one, so two concurrent checkouts both read the same maximum and both received
+  // BILLJI/2026-27/000001. They come from NumberSequence now — the same guarded $inc every other
+  // series uses.
+  it('never issues the same receipt number twice under concurrency', async () => {
+    await seeded();
+
+    // Straight at the allocator: 20 simultaneous claims. Read-max-then-add-1 handed several of these
+    // the identical number; a guarded $inc cannot.
+    const numbers = await Promise.all(Array.from({ length: 20 }, () => nextReceiptNumber()));
+
+    assert.equal(new Set(numbers).size, 20, `duplicate receipt numbers issued: ${numbers.join(', ')}`);
+    assert.ok(numbers.every((number) => /^BILLJI\/\d{4}-\d{2}\/\d{6}$/.test(number)), 'format unchanged');
+  });
+
+  it('rejects a second payment row carrying an already-issued receipt number', async () => {
+    const { token, business } = await seeded();
+    await checkout(token, { planKey: 'pro', interval: 'year' });
+    const existing = await SubscriptionPayment.findOne({ business: business._id });
+
+    // Belt to the allocator's braces: even a future code path that bypassed NumberSequence cannot
+    // persist a duplicate.
+    await assert.rejects(
+      () =>
+        SubscriptionPayment.create({
+          business: business._id,
+          provider: 'manual',
+          amount: 100,
+          netAmount: 100,
+          receipt: { number: existing.receipt.number }
+        }),
+      (error) => error.code === 11000
+    );
   });
 
   it('numbers receipts sequentially within the financial year', async () => {

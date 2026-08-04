@@ -22,17 +22,49 @@ const BUSINESS_UTC_OFFSET_MINUTES = 330;
 
 export const ALL_TIME = 'all_time';
 
+// A lapsed subscription's usage is bucketed separately from the paid usage of the same month.
+//
+// Without this, lapsing mid-month is indistinguishable from having spent the free allowance: a Pro
+// business that issued 5,000 documents in August and lapsed on the 20th falls back to the free plan's
+// 200/month ceiling with 5,000 already in this month's counter, so enforcement refuses the very next
+// document and keeps refusing until the 1st. None of those 5,000 were free-plan documents; the free
+// ceiling governs free-plan usage, so free-plan usage is what it counts.
+//
+// A suffixed periodKey rather than a `baseline` field on the row, deliberately: the counter's atomic
+// guard (`count: { $lte: limit - amount }`) is the whole reason two concurrent creates cannot both pass
+// at 199/200, and arithmetic against a second field would have to change it. A different key is a
+// different row, so the guarded increment is untouched. It also needs no lapse-detection job — the
+// bucket follows the resolved entitlements on every call, and renewing moves back to the paid bucket
+// on its own.
+const FALLBACK_SUFFIX = ':f';
+
+/**
+ * Does this resolution spend the fallback allowance rather than a purchased one?
+ *
+ * `source` comes from entitlementService.resolveEntitlements: 'snapshot' when the business holds what
+ * it bought, 'fallback' when a subscription exists but has lapsed, 'none' when there is no
+ * subscription at all. Only 'fallback' is bucketed apart — a pre-billing business ('none') has always
+ * counted into the main bucket, and moving it now would split the very meters the rollout decision
+ * reads.
+ */
+export const usesFallbackQuota = (entitlements) => entitlements?.source === 'fallback';
+
 /** 'YYYY-MM' in business time. Every monthly metric shares one key, so one query covers them all. */
-export const monthKeyFor = (date = new Date()) => {
+export const monthKeyFor = (date = new Date(), { fallback = false } = {}) => {
   const shifted = new Date(date.getTime() + BUSINESS_UTC_OFFSET_MINUTES * 60 * 1000);
-  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`;
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}${fallback ? FALLBACK_SUFFIX : ''}`;
 };
 
-/** 'YYYY-MM' for monthly limits, 'all_time' for the rest. A new key IS the monthly reset. */
-export const periodKeyFor = (limitKey, date = new Date()) => {
+/**
+ * 'YYYY-MM' for monthly limits, 'all_time' for the rest. A new key IS the monthly reset.
+ *
+ * The fallback split applies only to monthly limits. An all-time metered limit is a stock, not a flow
+ * — bucketing storage_bytes apart would hand a lapsed business a second full allowance of it.
+ */
+export const periodKeyFor = (limitKey, date = new Date(), { fallback = false } = {}) => {
   const definition = limitDefinition(limitKey);
   if (!definition) throw new Error(`Unknown limit key: ${limitKey}. Add it to constants/entitlements.js.`);
-  return definition.period === 'month' ? monthKeyFor(date) : ALL_TIME;
+  return definition.period === 'month' ? monthKeyFor(date, { fallback }) : ALL_TIME;
 };
 
 /** First instant of the next period — what the client shows as "resets on". null = never resets. */
@@ -58,8 +90,8 @@ const assertMetered = (limitKey) => {
 // Reading
 // ---------------------------------------------------------------------------
 
-export const currentUsage = async ({ business, limitKey, at = new Date() }) => {
-  const row = await SubscriptionUsage.findOne({ business, periodKey: periodKeyFor(limitKey, at), metric: limitKey });
+export const currentUsage = async ({ business, limitKey, at = new Date(), fallback = false }) => {
+  const row = await SubscriptionUsage.findOne({ business, periodKey: periodKeyFor(limitKey, at, { fallback }), metric: limitKey });
   return { count: row?.count || 0, overage: row?.overage || 0, row };
 };
 
@@ -72,7 +104,8 @@ export const currentUsage = async ({ business, limitKey, at = new Date() }) => {
 export const checkLimit = async ({ business, entitlements, limitKey, amount = 1, used = null, at = new Date() }) => {
   const limit = getLimit(entitlements, limitKey);
   const unlimited = isUnlimited(limit);
-  const count = used !== null ? used : (await currentUsage({ business, limitKey, at })).count;
+  const fallback = usesFallbackQuota(entitlements);
+  const count = used !== null ? used : (await currentUsage({ business, limitKey, at, fallback })).count;
   const remaining = unlimited ? Infinity : Math.max(0, limit - count);
 
   return {
@@ -83,14 +116,21 @@ export const checkLimit = async ({ business, entitlements, limitKey, amount = 1,
     remaining,
     percent: unlimited || limit === 0 ? 0 : Math.min(100, Math.round((count / limit) * 100)),
     limitKey,
-    periodKey: periodKeyFor(limitKey, at),
+    periodKey: periodKeyFor(limitKey, at, { fallback }),
     resetsAt: periodResetsAt(limitKey, at)
   };
 };
 
-/** Every limit in one call, for GET /billing/usage and the mobile meters. */
+/**
+ * Every limit in one call, for GET /billing/usage and the mobile meters.
+ *
+ * A lapsed business reads its fallback bucket, so the meter answers the question the ceiling actually
+ * governs: how much of the FREE plan's allowance is left. Reporting the paid month's 5,000 against a
+ * 200 ceiling would show "wildly over" for usage that ceiling never applied to.
+ */
 export const usageSummary = async ({ business, entitlements, liveCounts = {}, at = new Date() }) => {
-  const rows = await SubscriptionUsage.find({ business, periodKey: { $in: [monthKeyFor(at), ALL_TIME] } });
+  const fallback = usesFallbackQuota(entitlements);
+  const rows = await SubscriptionUsage.find({ business, periodKey: { $in: [monthKeyFor(at, { fallback }), ALL_TIME] } });
   const byMetric = new Map(rows.map((row) => [row.metric, row]));
 
   return ALL_LIMIT_KEYS.map((limitKey) => {
@@ -135,7 +175,8 @@ export const incrementUsage = async ({ business, entitlements, limitKey, amount 
   assertMetered(limitKey);
   const limit = getLimit(entitlements, limitKey);
   const unlimited = isUnlimited(limit);
-  const periodKey = periodKeyFor(limitKey, at);
+  const fallback = usesFallbackQuota(entitlements);
+  const periodKey = periodKeyFor(limitKey, at, { fallback });
   const base = { business, periodKey, metric: limitKey };
 
   if (unlimited) {
@@ -159,11 +200,11 @@ export const incrementUsage = async ({ business, entitlements, limitKey, amount 
 
     // Row exists and is at the ceiling. Either refuse, or accept and flag the overage.
     if (!allowOverage) {
-      const { count, overage } = await currentUsage({ business, limitKey, at });
+      const { count, overage } = await currentUsage({ business, limitKey, at, fallback });
       return { allowed: false, unlimited: false, limit, used: count, remaining: Math.max(0, limit - count), overage, limitKey, periodKey };
     }
 
-    return recordOverage({ business, limitKey, amount, limit, at });
+    return recordOverage({ business, limitKey, amount, limit, at, fallback });
   }
 };
 
@@ -175,9 +216,9 @@ export const incrementUsage = async ({ business, entitlements, limitKey, amount 
  * sequence and destroy trust. So the sync path counts, flags, and prompts an upgrade — it never
  * rejects. Interactive online creation still enforces the ceiling.
  */
-export const recordOverage = async ({ business, limitKey, amount = 1, limit = null, at = new Date() }) => {
+export const recordOverage = async ({ business, limitKey, amount = 1, limit = null, at = new Date(), fallback = false }) => {
   assertMetered(limitKey);
-  const periodKey = periodKeyFor(limitKey, at);
+  const periodKey = periodKeyFor(limitKey, at, { fallback });
   const base = { business, periodKey, metric: limitKey };
 
   const row = await SubscriptionUsage.findOneAndUpdate(
@@ -204,10 +245,11 @@ export const recordOverage = async ({ business, limitKey, amount = 1, limit = nu
  * failed transaction, a deleted draft. Never drops below zero, and does not touch `overage`:
  * an overage that happened is a fact, not a balance.
  */
-export const decrementUsage = async ({ business, limitKey, amount = 1, at = new Date() }) => {
+export const decrementUsage = async ({ business, limitKey, amount = 1, at = new Date(), fallback = false }) => {
   assertMetered(limitKey);
   const row = await SubscriptionUsage.findOneAndUpdate(
-    { business, periodKey: periodKeyFor(limitKey, at), metric: limitKey, count: { $gte: amount } },
+    // Must target the same bucket the unit was consumed from, or a release would silently do nothing.
+    { business, periodKey: periodKeyFor(limitKey, at, { fallback }), metric: limitKey, count: { $gte: amount } },
     { $inc: { count: -amount }, $set: { lastAt: at } },
     { new: true }
   );
@@ -220,9 +262,9 @@ export const remainingUsage = async ({ business, entitlements, limitKey, used = 
 };
 
 /** Seeds a counter to a known value. Used by the P7 backfill so day-one meters are honest. */
-export const setUsage = async ({ business, limitKey, count, limit = null, at = new Date() }) => {
+export const setUsage = async ({ business, limitKey, count, limit = null, at = new Date(), fallback = false }) => {
   assertMetered(limitKey);
-  const periodKey = periodKeyFor(limitKey, at);
+  const periodKey = periodKeyFor(limitKey, at, { fallback });
 
   return SubscriptionUsage.findOneAndUpdate(
     { business, periodKey, metric: limitKey },

@@ -5,10 +5,11 @@ import { paymentDto } from '../../contracts/billingDto.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { logAudit } from '../../services/auditService.js';
-import { createCheckout, listPayments, quote, verifyCheckout } from '../../services/billingService.js';
+import { confirmAutopayMandate } from '../../services/autopayService.js';
+import { cancelWithProvider, createCheckout, disableAutopay, listPayments, quote, verifyCheckout } from '../../services/billingService.js';
 import { findApplicableCoupon } from '../../services/couponService.js';
 import { availableProviders } from '../../services/payments/index.js';
-import { cancelSubscription, reactivateSubscription, startTrial } from '../../services/subscriptionService.js';
+import { reactivateSubscription, startTrial } from '../../services/subscriptionService.js';
 import { currentSubscription } from './service.js';
 
 // Only intervals a customer can actually buy. 'free' and 'lifetime' are not purchasable — a free
@@ -28,11 +29,23 @@ export const checkoutRules = [
   ...planSelector,
   body('interval').isIn(PURCHASABLE_INTERVALS).withMessage('interval must be month or year'),
   body('couponCode').optional({ checkFalsy: true }).trim().isLength({ max: 40 }),
-  body('provider').optional({ checkFalsy: true }).isIn(availableProviders().length ? availableProviders() : ['razorpay', 'manual'])
+  body('provider').optional({ checkFalsy: true }).isIn(availableProviders().length ? availableProviders() : ['razorpay', 'manual']),
+  // Set up a recurring mandate instead of taking one payment. Absent reads as false, so every
+  // existing client keeps buying exactly as it does today.
+  body('autopay').optional().isBoolean().toBoolean()
 ];
 
 export const verifyRules = [
-  body('orderId').trim().notEmpty().withMessage('orderId is required').isLength({ max: 160 }),
+  // Exactly one correlating id: `orderId` for a one-time payment, `subscriptionId` for a mandate
+  // approval. They are verified with different HMACs (see razorpayProvider), so accepting both at
+  // once would mean guessing which signature scheme the caller meant.
+  body('orderId').optional({ checkFalsy: true }).trim().isLength({ max: 160 }),
+  body('subscriptionId').optional({ checkFalsy: true }).trim().isLength({ max: 160 }),
+  body().custom((value) => {
+    if (!value.orderId && !value.subscriptionId) throw new Error('orderId or subscriptionId is required');
+    if (value.orderId && value.subscriptionId) throw new Error('send either orderId or subscriptionId, not both');
+    return true;
+  }),
   body('paymentId').trim().notEmpty().withMessage('paymentId is required').isLength({ max: 160 }),
   body('signature').trim().notEmpty().withMessage('signature is required').isLength({ max: 500 })
 ];
@@ -73,14 +86,16 @@ export const startCheckout = asyncHandler(async (req, res) => {
     planKey: req.body.planKey || null,
     interval: req.body.interval,
     couponCode: req.body.couponCode || '',
-    provider: req.body.provider
+    provider: req.body.provider,
+    autopay: Boolean(req.body.autopay)
   });
 
   void logAudit(req, {
-    action: 'billing.checkout_started',
+    action: checkout.autopay ? 'billing.autopay.enrolment_started' : 'billing.checkout_started',
     resourceType: 'subscription',
-    resourceId: checkout.paymentId,
-    metadata: { planKey: checkout.plan.planKey, interval: checkout.interval, amount: checkout.amount }
+    // An autopay enrolment has no payment row yet — the mandate is the thing that was created.
+    resourceId: checkout.paymentId || checkout.subscriptionId || '',
+    metadata: { planKey: checkout.plan.planKey, interval: checkout.interval, amount: checkout.amount, autopay: Boolean(checkout.autopay) }
   });
 
   res.status(201).json({ success: true, checkout });
@@ -91,14 +106,23 @@ export const startCheckout = asyncHandler(async (req, res) => {
  * immediately instead of polling. Whichever lands first activates, and the other becomes a no-op.
  */
 export const confirmCheckout = asyncHandler(async (req, res) => {
-  const { payment, alreadyApplied } = await verifyCheckout({
-    business: req.business,
-    orderId: req.body.orderId,
-    paymentId: req.body.paymentId,
-    signature: req.body.signature
-  });
+  // Which id arrived decides which instrument is being confirmed — and therefore which signature
+  // scheme applies. The validator guarantees exactly one of them is present.
+  const { payment, alreadyApplied } = req.body.subscriptionId
+    ? await confirmAutopayMandate({
+        business: req.business,
+        subscriptionId: req.body.subscriptionId,
+        paymentId: req.body.paymentId,
+        signature: req.body.signature
+      })
+    : await verifyCheckout({
+        business: req.business,
+        orderId: req.body.orderId,
+        paymentId: req.body.paymentId,
+        signature: req.body.signature
+      });
 
-  if (!alreadyApplied) {
+  if (payment && !alreadyApplied) {
     void logAudit(req, {
       action: 'billing.payment_captured',
       resourceType: 'subscription',
@@ -109,7 +133,10 @@ export const confirmCheckout = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    payment: paymentDto(payment),
+    // Null only on the autopay path, when the mandate is approved but the first debit has not landed
+    // yet. That is a success — the plan activates on the charge event — so it must not be an error
+    // the client shows as a failed payment.
+    payment: payment ? paymentDto(payment) : null,
     subscription: await currentSubscription({ user: req.user, business: req.business })
   });
 });
@@ -162,7 +189,10 @@ export const beginTrial = asyncHandler(async (req, res) => {
 });
 
 export const cancel = asyncHandler(async (req, res) => {
-  await cancelSubscription({
+  // cancelWithProvider, not cancelSubscription: a cancelled subscription whose mandate is still live
+  // would keep debiting the customer who just cancelled. It stops the mandate first and refuses to
+  // cancel locally if it cannot.
+  await cancelWithProvider({
     business: req.business,
     reason: req.body.reason || '',
     actor: { type: 'user', userId: req.user._id }
@@ -174,6 +204,25 @@ export const cancel = asyncHandler(async (req, res) => {
     resourceId: String(req.business._id),
     metadata: { reason: req.body.reason || '' }
   });
+
+  res.json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business }) });
+});
+
+/**
+ * Turn autopay off, keep the plan. Distinct from cancelling on purpose — "stop charging me
+ * automatically" and "end my subscription" are different intentions and conflating them is how a
+ * customer loses access they meant to keep.
+ */
+export const turnOffAutopay = asyncHandler(async (req, res) => {
+  const { changed } = await disableAutopay({ business: req.business });
+
+  if (changed) {
+    void logAudit(req, {
+      action: 'billing.autopay.disabled',
+      resourceType: 'subscription',
+      resourceId: String(req.business._id)
+    });
+  }
 
   res.json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business }) });
 });
