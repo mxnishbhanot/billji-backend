@@ -1573,6 +1573,19 @@ mutable).
   entity the bank's own SMS will show.
 - **GST on a recurring charge.** `tax` is still 0 and no tax invoice exists (§16.13); autopay makes that
   gap 12× more frequent per customer.
-- **`alreadyApplied()` errs toward "already applied"**, so a lost history row on a *renewal* can leave a
-  paid cycle un-extended. Pre-existing on the manual path; autopay makes it 12× more likely. Fix: for
-  `kind:'renewal'`, trust only the direct `SubscriptionHistory.metadata.paymentId` signal.
+## 17.6 Fixed along the way
+
+- **`alreadyApplied()` used to write off a stranded renewal.** Its state fallback ("on this plan, period
+  started after this payment") is satisfied by ANY later cycle, so: cycle 2 captured, its activation
+  dies, cycle 3 lands normally, and cycle 2 is now judged already applied — customer paid for three
+  months, holds two. Pre-existing on the manual path; monthly autopay makes it 12× more likely. Now a
+  `kind:'renewal'` row trusts only the direct `SubscriptionHistory.metadata.paymentId` signal. Accepted
+  trade: a lost history row on a renewal means we re-apply and gift a month — visible in the audit trail
+  and recoverable, unlike silently swallowing a month that was paid for.
+- **Billing notifications were unmutable.** `subscription-renewal` and `subscription-grace` have been
+  sent since §16.9 but were never in `NOTIFICATION_TYPES`, which is what the preference screen iterates.
+- **A 401 from Razorpay was a reasonless 502** — it carries a bare `{"error":"Unauthorized"}` rather than
+  the usual `{error:{description}}`. Now `PROVIDER_UNAUTHORIZED`, naming both causes (bad key, or product
+  not enabled on the account).
+- **The mobile checkout WebView refused non-http schemes**, so UPI intent (`upi://`, `phonepe://`) died
+  silently. That blocked UPI Autopay outright and had already been breaking one-time UPI-intent payments.

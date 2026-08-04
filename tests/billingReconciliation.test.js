@@ -45,17 +45,17 @@ beforeEach(async () => {
  * money taken, status `captured`, and no subscription link — because that field is only written after
  * the plan is applied.
  */
-const strandedPayment = async ({ planKey = 'pro', ageMs = 30 * MINUTE, netAmount = 199900 } = {}) => {
+const strandedPayment = async ({ planKey = 'pro', ageMs = 30 * MINUTE, netAmount = 199900, kind = 'subscription', interval = 'year' } = {}) => {
   const payment = await SubscriptionPayment.create({
     business: context.business._id,
     provider: 'razorpay',
     status: 'captured',
-    kind: 'subscription',
+    kind,
     amount: netAmount,
     netAmount,
     planKey,
-    billingInterval: 'year',
-    providerRefs: { orderId: `order_${planKey}_${ageMs}`, paymentId: `pay_${planKey}_${ageMs}` },
+    billingInterval: interval,
+    providerRefs: { orderId: `order_${planKey}_${kind}_${ageMs}`, paymentId: `pay_${planKey}_${kind}_${ageMs}` },
     receipt: { number: await nextReceiptNumber() }
   });
 
@@ -141,6 +141,59 @@ describe('captured-but-not-activated recovery', () => {
     const result = await reconcileCapturedPayments();
 
     assert.equal(result.recovered, 0);
+    assert.equal((await Subscription.findOne({ business: context.business._id })).currentPeriodEnd.getTime(), periodEnd);
+  });
+
+  /**
+   * The renewal hole. The state fallback ("on this plan, period started after this payment") is
+   * satisfied by ANY later cycle, so a stranded renewal used to be written off as already applied once
+   * the next cycle landed: the customer paid for three months and held two. Monthly autopay makes this
+   * sequence twelve times more likely than the manual path did.
+   */
+  it('recovers a stranded renewal even after a later cycle moved the period on', async () => {
+    const pro = await Plan.findOne({ key: 'pro' });
+    await applyPlan({ business: context.business._id, plan: pro, interval: 'month', action: 'activated', amount: 24900 });
+
+    const stranded = await strandedPayment({ kind: 'renewal', interval: 'month', netAmount: 24900 });
+
+    // A LATER cycle activates normally, pushing currentPeriodStart past the stranded row's createdAt.
+    const later = await applyPlan({
+      business: context.business._id,
+      plan: pro,
+      interval: 'month',
+      action: 'renewed',
+      amount: 24900,
+      metadata: { paymentId: 'some-other-payment' }
+    });
+    const beforeRecovery = later.currentPeriodEnd.getTime();
+
+    const result = await reconcileCapturedPayments();
+
+    assert.equal(result.recovered, 1, 'a paid month must never be written off because a later month landed');
+    const after = await Subscription.findOne({ business: context.business._id });
+    assert.ok(after.currentPeriodEnd.getTime() > beforeRecovery, 'the month this payment bought is granted');
+    assert.equal(String((await SubscriptionPayment.findById(stranded._id)).subscription), String(after._id));
+  });
+
+  it('still leaves a renewal alone when its own history row proves it was applied', async () => {
+    const pro = await Plan.findOne({ key: 'pro' });
+    await applyPlan({ business: context.business._id, plan: pro, interval: 'month', action: 'activated', amount: 24900 });
+    const payment = await strandedPayment({ kind: 'renewal', interval: 'month', netAmount: 24900 });
+
+    // The direct signal: history tagged with THIS payment. Only the links were lost.
+    const subscription = await applyPlan({
+      business: context.business._id,
+      plan: pro,
+      interval: 'month',
+      action: 'renewed',
+      amount: 24900,
+      metadata: { paymentId: String(payment._id) }
+    });
+    const periodEnd = subscription.currentPeriodEnd.getTime();
+
+    const result = await reconcileCapturedPayments();
+
+    assert.deepEqual({ recovered: result.recovered, backfilled: result.backfilled }, { recovered: 0, backfilled: 1 });
     assert.equal((await Subscription.findOne({ business: context.business._id })).currentPeriodEnd.getTime(), periodEnd);
   });
 

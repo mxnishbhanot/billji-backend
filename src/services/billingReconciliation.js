@@ -46,13 +46,23 @@ const alert = (business, action, metadata) => {
 /**
  * Was the plan for this payment already applied?
  *
- * Two signals, because neither alone is enough. History is the direct evidence, but it is written
- * fire-and-forget (a lost row must never fail a paid transition), so its absence does not prove
- * anything. The subscription's own state is the fallback: the plan this payment bought, applied after
- * this payment was created.
+ * History is the direct evidence: a row tagged with this payment's id. It is written fire-and-forget
+ * (a lost row must never fail a paid transition), so its absence does not prove anything on its own —
+ * hence the state fallback below.
  *
- * Erring towards "already applied" is deliberate. Re-applying a renewal would extend the period a
- * second time — a free month. Leaving a row for a human to look at costs a support ticket.
+ * **The state fallback does not apply to a renewal, and that distinction is load-bearing.** It asks
+ * "is the subscription on this plan, with a period that started after this payment?" — which a LATER
+ * cycle satisfies just as well as this one. Sequence that loses money: cycle 2's row is captured, its
+ * activation dies, cycle 3 arrives and applies normally, and now `currentPeriodStart` is past cycle 2's
+ * `createdAt`, so cycle 2 is written off as already applied. The customer paid for three months and
+ * holds two. Pre-existing on the manual renewal path; monthly autopay makes it twelve times more likely.
+ *
+ * For a first purchase or an upgrade the fallback is still right: those move the plan or start the
+ * period, so the state genuinely evidences them.
+ *
+ * The trade this accepts: if a renewal's history write is the thing that was lost, we re-apply and the
+ * customer gets a month they did not pay for. Gifting a month is recoverable and visible in the audit
+ * trail; silently swallowing a month they DID pay for is neither.
  */
 const alreadyApplied = async (payment) => {
   const history = await SubscriptionHistory.findOne({
@@ -60,6 +70,8 @@ const alreadyApplied = async (payment) => {
     'metadata.paymentId': String(payment._id)
   }).lean();
   if (history) return true;
+
+  if (payment.kind === 'renewal') return false;
 
   const subscription = await getSubscription(payment.business);
   return Boolean(
