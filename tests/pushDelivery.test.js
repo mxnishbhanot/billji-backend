@@ -118,6 +118,28 @@ describe('push delivery', () => {
     assert.equal(result.skipped, 'no_recipients');
   });
 
+  // The solo-owner case: the only active member is also the actor on every event they cause.
+  // Excluding the actor unconditionally meant a one-person business got no push, ever.
+  it('still pushes a stock or overdue alert to the person who caused it', async () => {
+    const { business, user } = await createTestContext();
+    await registerToken(business, user, 'token-a');
+    const send = fakeSender();
+    setPushSenderForTests(send);
+
+    const stock = await sendPushForNotification(
+      { business: business._id, type: 'negative-stock', title: 'Oversold' },
+      { excludeUserId: user._id }
+    );
+    const overdue = await sendPushForNotification(
+      { business: business._id, type: 'overdue-invoice', title: 'Overdue' },
+      { excludeUserId: user._id }
+    );
+
+    assert.equal(stock.sent, 1);
+    assert.equal(overdue.sent, 1);
+    assert.deepEqual(send.calls[0].tokens, ['token-a']);
+  });
+
   it('never pushes to another business, even for a shared user', async () => {
     const mine = await createTestContext();
     const theirs = await createTestContext();

@@ -13,8 +13,23 @@ const DEAD_TOKEN_CODES = new Set([
   'messaging/invalid-argument'
 ]);
 
+// Alerts about the *state of the business*, not about "someone did X". The person whose
+// action tripped one still needs to hear it — overselling stock is news even to the person
+// who just sold it, and for a solo owner (the only active member is also always the actor)
+// excluding the actor meant these never pushed to anyone at all.
+const SELF_RELEVANT_TYPES = new Set([
+  'negative-stock',
+  'low-stock',
+  'overdue-invoice',
+  'due-soon-invoice',
+  'old-pending-invoice'
+]);
+
 // Swappable so tests can assert what would be sent without touching Firebase.
 let sender = null;
+// A missing service account is silent by design (push degrades, writes still succeed), which
+// makes a misconfigured deployment invisible. Say it once per process instead of never.
+let warnedNotConfigured = false;
 
 /** @param {null | ((message: object) => Promise<{responses: {success: boolean, error?: {code?: string}}[]}>)} fn */
 export const setPushSenderForTests = (fn) => {
@@ -83,9 +98,20 @@ const chunk = (items, size) => {
 export const sendPushForNotification = async (notification, { excludeUserId = null } = {}) => {
   try {
     const send = resolveSender();
-    if (!send) return { sent: 0, pruned: 0, skipped: 'not_configured' };
+    if (!send) {
+      if (!warnedNotConfigured && process.env.NODE_ENV !== 'test') {
+        warnedNotConfigured = true;
+        console.warn(
+          '[push] no Firebase credentials — push notifications are disabled. Set FIREBASE_SERVICE_ACCOUNT (or FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY).'
+        );
+      }
+      return { sent: 0, pruned: 0, skipped: 'not_configured' };
+    }
 
-    const tokens = await recipientTokensFor(notification.business, { type: notification.type, excludeUserId });
+    const tokens = await recipientTokensFor(notification.business, {
+      type: notification.type,
+      excludeUserId: SELF_RELEVANT_TYPES.has(notification.type) ? null : excludeUserId
+    });
     if (!tokens.length) return { sent: 0, pruned: 0, skipped: 'no_recipients' };
 
     let sent = 0;
