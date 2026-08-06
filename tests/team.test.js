@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import request from 'supertest';
 import app from '../src/app.js';
 import BusinessMember from '../src/models/BusinessMember.js';
+import Session from '../src/models/Session.js';
+import User from '../src/models/User.js';
 import { bootstrapRbac } from '../src/bootstrap/rbac.js';
 import { useMongoTestDb } from './helpers/db.js';
 import { authHeader, createTestContext } from './helpers/fixtures.js';
@@ -104,5 +106,55 @@ describe('team management', () => {
 
     const updated = await BusinessMember.findById(member._id);
     assert.equal(updated.roleKey, 'admin');
+  });
+
+  it('stops an admin from unmaking an owner', async () => {
+    // Symmetric with "no escalation" above, and load-bearing now that billing is gated on
+    // ownership: an admin who can demote the owner can seize the business's billing authority.
+    // Two owners, so the last-owner guard is not what is doing the work here.
+    const owner = await createTestContext();
+    const admin = await createTestContext({ roleKey: 'admin' });
+    await BusinessMember.updateOne({ _id: admin.membership._id }, { $set: { business: owner.business._id } });
+    const secondOwner = await createTestContext();
+    await BusinessMember.updateOne({ _id: secondOwner.membership._id }, { $set: { business: owner.business._id } });
+    await User.updateOne({ _id: admin.user._id }, { $set: { defaultBusiness: owner.business._id } });
+
+    const demote = await request(app).patch(`${API}/members/${owner.user._id}/role`).set(authHeader(admin.token)).send({ roleKey: 'viewer' });
+    assert.equal(demote.status, 403, demote.text);
+
+    const archive = await request(app).patch(`${API}/members/${owner.user._id}/status`).set(authHeader(admin.token)).send({ status: 'archived' });
+    assert.equal(archive.status, 403, archive.text);
+
+    const remove = await request(app).delete(`${API}/members/${owner.user._id}`).set(authHeader(admin.token));
+    assert.equal(remove.status, 403, remove.text);
+
+    assert.equal((await BusinessMember.findById(owner.membership._id)).roleKey, 'owner');
+  });
+
+  it('lets an owner demote another owner', async () => {
+    const owner = await createTestContext();
+    const secondOwner = await createTestContext();
+    await BusinessMember.updateOne({ _id: secondOwner.membership._id }, { $set: { business: owner.business._id } });
+
+    const res = await request(app).patch(`${API}/members/${secondOwner.user._id}/role`).set(authHeader(owner.token)).send({ roleKey: 'viewer' });
+    assert.equal(res.status, 200, res.text);
+    assert.equal((await BusinessMember.findById(secondOwner.membership._id)).roleKey, 'viewer');
+  });
+
+  it('leaves nothing pointing at a workspace a removed member can no longer act in', async () => {
+    const owner = await createTestContext();
+    const inviteRes = await invite(owner.token, { email: 'goodbye@billji.local', roleKey: 'staff' });
+    const accepted = await request(app)
+      .post(`${API}/invitations/accept`)
+      .send({ token: inviteRes.body.inviteToken, name: 'Goodbye', password: 'password123' });
+    const memberId = accepted.body.user.id;
+
+    assert.equal(String((await User.findById(memberId)).defaultBusiness), String(owner.business._id));
+    assert.ok((await Session.countDocuments({ user: memberId })) > 0, 'accepting an invite issues a session');
+
+    assert.equal((await request(app).delete(`${API}/members/${memberId}`).set(authHeader(owner.token))).status, 200);
+
+    assert.equal((await User.findById(memberId)).defaultBusiness, null);
+    assert.equal(await Session.countDocuments({ user: memberId }), 0);
   });
 });

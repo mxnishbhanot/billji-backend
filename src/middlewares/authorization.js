@@ -1,8 +1,8 @@
 import Role from '../models/Role.js';
 import { ApiError } from '../utils/ApiError.js';
-import { ALL_PERMISSION_KEYS, PERMISSIONS } from '../constants/permissions.js';
+import { ALL_PERMISSION_KEYS, BILLING_OWNER_ROLES, canManageBillingFor, PERMISSIONS } from '../constants/permissions.js';
 
-export { PERMISSIONS };
+export { BILLING_OWNER_ROLES, canManageBillingFor, PERMISSIONS };
 
 const allPermissions = ALL_PERMISSION_KEYS;
 
@@ -29,6 +29,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.reportsView,
     // Sees what the business is paying and can pull invoices; cannot change the plan.
     PERMISSIONS.billingView,
+    PERMISSIONS.billingInvoices,
     PERMISSIONS.notificationsView,
     PERMISSIONS.notificationsManage
   ],
@@ -67,6 +68,29 @@ export const permissionsForMembership = async (membership) => {
   }
 
   return permissionsForRoleKey(membership?.roleKey);
+};
+
+/**
+ * The final authority on money. Buying, cancelling or changing a mandate binds the business owner
+ * to a charge, so it is gated on the membership itself — never on a permission key, which an admin,
+ * a custom Role, or a future edit to the role table could hand out by accident.
+ *
+ * Layered AFTER requirePermission, never instead of it: the permission answers "should this person
+ * see this control", ownership answers "may this person commit the business to a payment". Both
+ * must pass. Keeping them separate is what lets an accountant read invoices while an admin with
+ * every billing permission still cannot spend.
+ *
+ * Fails closed: an absent membership has no roleKey and matches nothing in the whitelist.
+ */
+export const requireBillingOwner = (req, _res, next) => {
+  if (!canManageBillingFor(req.membership)) {
+    return next(new ApiError(403, 'Only the business owner can complete this billing action', {
+      code: 'FORBIDDEN_OWNER_ONLY',
+      ownerOnly: true
+    }));
+  }
+
+  return next();
 };
 
 export const requirePermission = (...requiredPermissions) => async (req, _res, next) => {

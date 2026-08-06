@@ -3,6 +3,7 @@ import BusinessMember from '../../models/BusinessMember.js';
 import Customer from '../../models/Customer.js';
 import Plan from '../../models/Plan.js';
 import Product from '../../models/Product.js';
+import User from '../../models/User.js';
 import Vendor from '../../models/Vendor.js';
 import { LIMITS } from '../../constants/entitlements.js';
 import { subscriptionDto } from '../../contracts/billingDto.js';
@@ -42,16 +43,23 @@ export const liveCounts = async ({ entitlements, user, business }) => {
  * subscription — GET /billing/subscription, GET /billing/usage, and the `subscription` block on
  * auth responses — goes through here, so the shape can never diverge between them.
  */
-export const currentSubscription = async ({ user, business, access = null, now = new Date() }) => {
+export const currentSubscription = async ({ user, business, membership = null, access = null, now = new Date() }) => {
   // Callers behind `protect` pass req.access() so the whole request shares one resolve.
   const resolved = access || (await resolveAccess({ business, now }));
   const counts = await liveCounts({ entitlements: resolved.entitlements, user, business });
-  const [usage, plan] = await Promise.all([
+  const [usage, plan, owner] = await Promise.all([
     usageSummary({ business: business._id, entitlements: resolved.entitlements, liveCounts: counts, at: now }),
-    resolved.planId ? Plan.findById(resolved.planId).select('name key') : null
+    resolved.planId ? Plan.findById(resolved.planId).select('name key') : null,
+    // Name only. It is one line of copy ("Managed by Rohit Sharma") and it is already visible to
+    // any member through GET /team/members — an id or an email would be new disclosure with no
+    // screen asking for it.
+    business.owner ? User.findById(business.owner).select('name') : null
   ]);
 
-  return subscriptionDto({ access: resolved, usage, plan });
+  // Pass the REAL membership, never a synthesized one. publicUser() falls back to roleKey 'owner'
+  // when a membership is missing, which is right for a legacy user's permission list and very
+  // wrong for a money decision — so this is computed from the membership document itself.
+  return subscriptionDto({ access: resolved, usage, plan, owner, membership });
 };
 
 /** The pricing screen. Private plans (enterprise, grandfathering) are never listed. */

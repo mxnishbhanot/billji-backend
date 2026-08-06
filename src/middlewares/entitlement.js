@@ -3,6 +3,7 @@ import { env } from '../config/env.js';
 import Plan from '../models/Plan.js';
 import { logAudit } from '../services/auditService.js';
 import { canAccessFeature, getLimit, isUnlimited, plansGrantingFeature } from '../services/entitlementService.js';
+import { resolveAccess } from '../services/subscriptionService.js';
 import { checkLimit, decrementUsage, incrementUsage, recordOverage, usesFallbackQuota } from '../services/usageService.js';
 import { ApiError } from '../utils/ApiError.js';
 
@@ -224,13 +225,20 @@ export const requireLimit = (limitKey, countFor) => async (req, res, next) => {
 };
 
 /**
- * "May this business own another workspace?" — the `businesses` ceiling plus the multi_business
- * feature, in one call. Exported for the create-business endpoint (Decision 6); nothing creates a
- * second business today, and a guard for an endpoint that does not exist would be a guess.
+ * "May this user own another workspace?" — the `businesses` ceiling plus the multi_business
+ * feature, in one call. Used by POST /businesses.
+ *
+ * `business` overrides whose plan pays for the answer. Without it these checks read req.access(),
+ * which resolves the CURRENT workspace — so a viewer in someone else's Pro business would be
+ * measured against their employer's plan, in both directions. The caller passes a workspace the
+ * user actually owns; the first owned workspace is never gated at all, so this is only ever
+ * reached with one to point at.
  */
-export const assertBusinessCreationAllowed = async ({ req, res = null, ownedCount }) => {
-  await checkFeatureAccess({ req, res, featureKey: 'multi_business' });
-  return checkLimitAllowed({ req, res, limitKey: LIMITS.businesses, used: ownedCount });
+export const assertBusinessCreationAllowed = async ({ req, res = null, ownedCount, business = null }) => {
+  const scoped = business ? { ...req, business, access: () => resolveAccess({ business }) } : req;
+
+  await checkFeatureAccess({ req: scoped, res, featureKey: 'multi_business' });
+  return checkLimitAllowed({ req: scoped, res, limitKey: LIMITS.businesses, used: ownedCount });
 };
 
 // ---------------------------------------------------------------------------

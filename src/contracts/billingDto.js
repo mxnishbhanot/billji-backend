@@ -1,3 +1,4 @@
+import { canManageBillingFor } from '../constants/permissions.js';
 import { isUnlimited } from '../services/entitlementService.js';
 
 // THE STABLE BILLING CONTRACT.
@@ -52,11 +53,13 @@ const usageRowDto = (row) => ({
  *   expiryDate        when access actually ends. null when it never does.
  *   gracePeriodEndsAt last instant of continued access after expiryDate. null when no grace.
  *
- * @param {object} access  result of subscriptionService.resolveAccess()
- * @param {Array}  usage   result of usageService.usageSummary()
- * @param {object} plan    the Plan document (for planName), optional
+ * @param {object} access      result of subscriptionService.resolveAccess()
+ * @param {Array}  usage       result of usageService.usageSummary()
+ * @param {object} plan        the Plan document (for planName), optional
+ * @param {object} owner       the owning User (name only), optional
+ * @param {object} membership  the caller's BusinessMember, optional. Absent = cannot manage billing.
  */
-export const subscriptionDto = ({ access, usage = [], plan = null }) => {
+export const subscriptionDto = ({ access, usage = [], plan = null, owner = null, membership = null }) => {
   const subscription = access?.subscription || null;
   const cancelPending = Boolean(subscription?.cancel?.effectiveAt);
   const expiryDate = subscription?.cancel?.effectiveAt || subscription?.currentPeriodEnd || null;
@@ -75,6 +78,22 @@ export const subscriptionDto = ({ access, usage = [], plan = null }) => {
 
     subscriptionStatus: access?.status || 'none',
     billingInterval: subscription?.billingInterval || null,
+
+    /**
+     * Who to ask, and whether you are them.
+     *
+     * `billingOwnerName` is one line of copy for the non-owner screen — "Managed by Rohit Sharma".
+     * Nothing else about the owner is exposed: an id would invite the client to build contact or
+     * linking features that do not exist, and an email is PII that every billing.view holder,
+     * including a plain viewer, would suddenly be able to read.
+     *
+     * `canManageBilling` is the SERVER's answer to "may this member spend", computed from the same
+     * BILLING_OWNER_ROLES list the requireBillingOwner middleware uses. The client renders money
+     * controls from this and never re-derives the rule, so the two cannot drift — and if it ever
+     * were wrong, the API still refuses. It is false whenever the membership is unknown.
+     */
+    billingOwnerName: owner?.name || null,
+    canManageBilling: canManageBillingFor(membership),
 
     renewalDate: cancelPending ? null : iso(subscription?.currentPeriodEnd),
     expiryDate: iso(expiryDate),

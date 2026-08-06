@@ -4,6 +4,7 @@ import Business from '../models/Business.js';
 import BusinessInvitation from '../models/BusinessInvitation.js';
 import BusinessMember from '../models/BusinessMember.js';
 import Role from '../models/Role.js';
+import Session from '../models/Session.js';
 import User from '../models/User.js';
 import { env, isProduction } from '../config/env.js';
 import { LIMITS } from '../constants/entitlements.js';
@@ -35,6 +36,16 @@ const assertCanGrantRole = (req, targetRoleKey) => {
   const escalates = targetPermissions.some((permission) => !actorPermissions.has(permission));
   if (escalates) {
     throw new ApiError(403, 'You cannot grant a role with more permissions than your own');
+  }
+};
+
+// Symmetric with assertCanGrantRole: if only an owner may make an owner, only an owner may unmake
+// one. Without this an admin can demote, archive or remove an owner — and with billing gated on
+// ownership (requireBillingOwner) that is a route to seizing the business's billing authority.
+// Applied to every path that ends an owner's ownership, not just the one a ticket happens to name.
+const assertCanUnmakeOwner = (req, member) => {
+  if (member.roleKey === 'owner' && req.membership.roleKey !== 'owner') {
+    throw new ApiError(403, "Only an owner can change another owner's role or access");
   }
 };
 
@@ -120,6 +131,7 @@ const findMember = async (req) => {
 
 export const updateMemberRole = asyncHandler(async (req, res) => {
   const member = await findMember(req);
+  assertCanUnmakeOwner(req, member);
   const from = { roleKey: member.roleKey, role: member.role };
 
   if (req.body.roleId) {
@@ -158,6 +170,8 @@ export const updateMemberRole = asyncHandler(async (req, res) => {
 export const updateMemberStatus = asyncHandler(async (req, res) => {
   const member = await findMember(req);
   const { status } = req.body;
+  // Archiving an owner is demotion by another name.
+  if (status === 'archived') assertCanUnmakeOwner(req, member);
   if (status === 'archived') await assertNotLastOwner(req.business._id, member);
 
   member.status = status;
@@ -180,12 +194,21 @@ export const updateMemberStatus = asyncHandler(async (req, res) => {
 
 export const removeMember = asyncHandler(async (req, res) => {
   const member = await findMember(req);
+  assertCanUnmakeOwner(req, member);
   await assertNotLastOwner(req.business._id, member);
 
   member.status = 'removed';
   member.removedAt = new Date();
   member.removedBy = req.user._id;
   await member.save();
+
+  // Leave nothing pointing at a workspace this user can no longer act in. Without the first write
+  // their next request falls through auth.js's fallback into whichever other workspace they joined
+  // earliest — silently, and with no indication of why. Without the second, live tokens keep
+  // resolving until they expire.
+  await User.updateOne({ _id: member.user, defaultBusiness: req.business._id }, { $unset: { defaultBusiness: 1 } });
+  await Session.deleteMany({ user: member.user });
+
   void logAudit(req, { action: 'member.removed', resourceType: 'member', resourceId: member.user });
 
   res.json({ success: true });

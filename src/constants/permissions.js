@@ -91,11 +91,20 @@ export const PERMISSION_GROUPS = [
   {
     domain: 'billing',
     label: 'Plan & billing',
+    // Separate from settings.manage on purpose: letting a manager edit invoice templates is not
+    // the same as letting them spend the owner's money.
+    //
+    // Granular by design. A permission here answers "should this person SEE this control" — it
+    // never answers "may this person commit the business to a payment". That second question is
+    // ownership, enforced by requireBillingOwner (middlewares/authorization.js) on top of these.
     permissions: [
-      { name: 'billingView', key: 'billing.view', label: 'View plan, usage & invoices' },
-      // Separate from settings.manage on purpose: letting a manager edit invoice templates is not
-      // the same as letting them spend the owner's money.
-      { name: 'billingManage', key: 'billing.manage', label: 'Change plan & make payments' }
+      { name: 'billingView', key: 'billing.view', label: 'View plan & usage' },
+      { name: 'billingInvoices', key: 'billing.invoices', label: 'View invoices & payment history' },
+      { name: 'billingPaymentMethod', key: 'billing.payment_method', label: 'Manage payment method & autopay' },
+      { name: 'billingSubscriptionChange', key: 'billing.subscription_change', label: 'Buy, upgrade, downgrade or cancel the plan' },
+      // The umbrella. Kept under its original key so seeded Permission documents and existing
+      // custom Roles keep working with no migration — route guards accept it OR the specific key.
+      { name: 'billingManage', key: 'billing.manage', label: 'Full billing control' }
     ]
   },
   {
@@ -114,3 +123,23 @@ export const PERMISSIONS = Object.fromEntries(
 );
 
 export const ALL_PERMISSION_KEYS = PERMISSION_GROUPS.flatMap((group) => group.permissions.map((permission) => permission.key));
+
+/**
+ * Roles whose members may commit the business to a payment. NOT a permission — deliberately.
+ *
+ * A permission answers "should this person see this control". This answers "may this person bind
+ * the business to a charge", and no permission key can grant it: not an admin's, not a custom
+ * Role's, not one a future edit to the role table hands out by accident.
+ *
+ * A single named list, not an inline comparison, because this is the seam a Billing Admin role
+ * grows out of: adding one is `['owner', 'billing_admin']` here plus that role's permission row —
+ * no route changes, no new middleware, no client release.
+ *
+ * Lives here rather than in the middleware so both the guard and the DTO can read it without the
+ * contracts layer importing middleware.
+ */
+export const BILLING_OWNER_ROLES = ['owner'];
+
+/** Fails closed: an absent membership has no roleKey and matches nothing in the whitelist. */
+export const canManageBillingFor = (membership) =>
+  Boolean(membership) && BILLING_OWNER_ROLES.includes(membership.roleKey);

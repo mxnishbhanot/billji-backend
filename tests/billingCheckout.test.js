@@ -751,14 +751,19 @@ describe('payment history', () => {
 });
 
 describe('authorization', () => {
-  it('lets a viewer read the plan but not spend money', async () => {
+  it('lets a viewer read the plan but not the invoices, and not spend money', async () => {
     clearPlanCache();
     await bootstrapBilling();
     const viewer = await createTestContext({ roleKey: 'viewer' });
     await ensureSubscription({ business: viewer.business });
 
-    const read = await request(app).get('/api/v1/billing/payments').set(authHeader(viewer.token));
+    const read = await request(app).get('/api/v1/billing/subscription').set(authHeader(viewer.token));
     assert.equal(read.status, 200, read.text);
+
+    // Invoices are financial records, one notch narrower than plan status: billing.invoices, which
+    // an accountant holds and a viewer does not.
+    const invoices = await request(app).get('/api/v1/billing/payments').set(authHeader(viewer.token));
+    assert.equal(invoices.status, 403);
 
     const spend = await checkout(viewer.token, { planKey: 'pro', interval: 'year' });
     assert.equal(spend.status, 403);

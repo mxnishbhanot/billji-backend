@@ -11,7 +11,7 @@ import { currentSubscription, listPlans } from './service.js';
  * `subscription` block on every auth response, so mobile has a single thing to code against.
  */
 export const getSubscription = asyncHandler(async (req, res) => {
-  const subscription = await currentSubscription({ user: req.user, business: req.business, access: await req.access() });
+  const subscription = await currentSubscription({ user: req.user, business: req.business, membership: req.membership, access: await req.access() });
 
   res.json({ success: true, subscription });
 });
@@ -22,7 +22,7 @@ export const getSubscription = asyncHandler(async (req, res) => {
  * fields rather than inventing a second usage shape.
  */
 export const getUsage = asyncHandler(async (req, res) => {
-  const subscription = await currentSubscription({ user: req.user, business: req.business, access: await req.access() });
+  const subscription = await currentSubscription({ user: req.user, business: req.business, membership: req.membership, access: await req.access() });
 
   res.json({
     success: true,

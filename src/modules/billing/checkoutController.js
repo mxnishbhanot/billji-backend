@@ -137,7 +137,7 @@ export const confirmCheckout = asyncHandler(async (req, res) => {
     // yet. That is a success — the plan activates on the charge event — so it must not be an error
     // the client shows as a failed payment.
     payment: payment ? paymentDto(payment) : null,
-    subscription: await currentSubscription({ user: req.user, business: req.business })
+    subscription: await currentSubscription({ user: req.user, business: req.business, membership: req.membership })
   });
 });
 
@@ -185,7 +185,7 @@ export const beginTrial = asyncHandler(async (req, res) => {
     metadata: { planKey: plan.key, days: plan.trial.days }
   });
 
-  res.status(201).json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business }) });
+  res.status(201).json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business, membership: req.membership }) });
 });
 
 export const cancel = asyncHandler(async (req, res) => {
@@ -205,7 +205,7 @@ export const cancel = asyncHandler(async (req, res) => {
     metadata: { reason: req.body.reason || '' }
   });
 
-  res.json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business }) });
+  res.json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business, membership: req.membership }) });
 });
 
 /**
@@ -224,7 +224,7 @@ export const turnOffAutopay = asyncHandler(async (req, res) => {
     });
   }
 
-  res.json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business }) });
+  res.json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business, membership: req.membership }) });
 });
 
 export const reactivate = asyncHandler(async (req, res) => {
@@ -232,7 +232,7 @@ export const reactivate = asyncHandler(async (req, res) => {
 
   void logAudit(req, { action: 'billing.subscription_reactivated', resourceType: 'subscription', resourceId: String(req.business._id) });
 
-  res.json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business }) });
+  res.json({ success: true, subscription: await currentSubscription({ user: req.user, business: req.business, membership: req.membership }) });
 });
 
 export const getPayments = asyncHandler(async (req, res) => {
