@@ -312,7 +312,9 @@ export const inviteMember = asyncHandler(async (req, res) => {
     success: true,
     invitation: { id: invitation._id, email, roleKey: invitation.roleKey, roleName: invitation.roleName, expiresAt: invitation.expiresAt },
     inviteToken: !isProduction ? token : undefined,
-    emailError: !isProduction ? emailError : undefined
+    // Always surfaced: the invite row exists but the email didn't go out, so the
+    // inviter must know to resend or share the code manually.
+    emailError
   });
 });
 
@@ -342,7 +344,7 @@ export const resendInvitation = asyncHandler(async (req, res) => {
   }
   void logAudit(req, { action: 'invitation.resent', resourceType: 'invitation', resourceId: invitation._id });
 
-  res.json({ success: true, inviteToken: !isProduction ? token : undefined, emailError: !isProduction ? emailError : undefined });
+  res.json({ success: true, inviteToken: !isProduction ? token : undefined, emailError });
 });
 
 export const cancelInvitation = asyncHandler(async (req, res) => {

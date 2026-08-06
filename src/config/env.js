@@ -49,7 +49,15 @@ export const env = {
   resend: {
     apiKey: process.env.RESEND_API_KEY || '',
     // Must be a verified sender/domain in the Resend dashboard.
-    from: process.env.RESEND_FROM || process.env.SMTP_FROM || 'QuickInvoice <onboarding@resend.dev>'
+    //
+    // SMTP_FROM wins when SMTP_HOST is set: that dev-only path sends through a real
+    // mailbox (e.g. Gmail), which rejects any From it doesn't own — so a leftover
+    // RESEND_FROM must not leak into it.
+    from:
+      (process.env.SMTP_HOST && process.env.SMTP_FROM) ||
+      process.env.RESEND_FROM ||
+      process.env.SMTP_FROM ||
+      'QuickInvoice <onboarding@resend.dev>'
   },
   // Cloudflare R2 (S3-compatible) for caching rendered invoice PDFs. When any of
   // accountId/accessKeyId/secretAccessKey/bucket is missing the cache is disabled
