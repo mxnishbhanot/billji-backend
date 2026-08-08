@@ -142,3 +142,21 @@ describe('report summary dues and top customers', () => {
     assert.equal(report.performance.averageInvoiceValue, Math.round((2500 / 3) * 100) / 100);
   });
 });
+
+describe('report summary customer and product counts', () => {
+  it('returns totalCustomers and totalProducts for the business', async () => {
+    const { business } = await createTestContext();
+    const Customer = (await import('../src/models/Customer.js')).default;
+    const Product = (await import('../src/models/Product.js')).default;
+
+    await Customer.create({ business: business._id, name: 'Walk-in', phone: '9000000001' });
+    await Customer.create({ business: business._id, name: 'Retail', phone: '9000000002' });
+    await Product.create({ business: business._id, name: 'Rice', price: 50, stockQuantity: 10 });
+
+    invalidateReportSummaryCache(business._id);
+    const report = await getReportSummary(business._id);
+
+    assert.equal(report.totalCustomers, 2);
+    assert.equal(report.totalProducts, 1);
+  });
+});

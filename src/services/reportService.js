@@ -1,5 +1,7 @@
 import Invoice from '../models/Invoice.js';
 import Payment from '../models/Payment.js';
+import Customer from '../models/Customer.js';
+import Product from '../models/Product.js';
 import { expenseTotals } from '../modules/expenses/service.js';
 import { purchaseTotals } from '../modules/purchases/service.js';
 
@@ -174,9 +176,11 @@ export const getReportSummary = async (businessId, range = {}) => {
 
   const periodFrom = rangeDateFilter?.$gte ?? weekStart;
   const periodTo = rangeDateFilter?.$lte ?? endOfDay(now);
-  const [expenseSummary, purchaseSummary] = await Promise.all([
+  const [expenseSummary, purchaseSummary, totalCustomers, totalProducts] = await Promise.all([
     expenseTotals(businessId, { from: periodFrom, to: periodTo }),
-    purchaseTotals(businessId, { from: periodFrom, to: periodTo })
+    purchaseTotals(businessId, { from: periodFrom, to: periodTo }),
+    Customer.countDocuments({ business: businessId }),
+    Product.countDocuments({ business: businessId })
   ]);
 
   const [paymentFacet = {}] = await Payment.aggregate([
@@ -227,6 +231,8 @@ export const getReportSummary = async (businessId, range = {}) => {
     rangeLabel,
     totalInvoices,
     pendingInvoices: pending,
+    totalCustomers,
+    totalProducts,
     averageInvoiceValue: totalInvoices ? money(totalValue / totalInvoices) : 0,
     invoiceCounts: counts.reduce((acc, item) => ({ ...acc, [item._id]: item.count }), {}),
     topProducts: topProducts.map((item) => ({ name: item._id, quantity: item.quantity, sales: money(item.sales) })),
