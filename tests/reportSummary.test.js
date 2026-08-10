@@ -160,3 +160,31 @@ describe('report summary customer and product counts', () => {
     assert.equal(report.totalProducts, 1);
   });
 });
+
+describe('report summary metric trends', () => {
+  it('returns a dense per-metric daily series scoped to each card', async () => {
+    const { business } = await createTestContext();
+
+    await createInvoice(business, { total: 1000, paidAmount: 1000, paymentStatus: 'paid' });
+    await createInvoice(business, { total: 400, paidAmount: 0, paymentStatus: 'unpaid' });
+
+    invalidateReportSummaryCache(business._id);
+    const report = await getReportSummary(business._id);
+    const { today, month, invoices, pending } = report.metricTrends;
+
+    // 7-day window, one bucket per day, no gaps.
+    assert.equal(today.length, 7);
+    assert.equal(invoices.length, 7);
+    assert.equal(pending.length, 7);
+    assert.equal(month.length, new Date().getDate());
+
+    // Today's bucket is the last one and carries this business's real numbers.
+    assert.equal(today.at(-1), 1000);
+    assert.equal(month.at(-1), 1000);
+    assert.equal(invoices.at(-1), 2);
+    // Only the unpaid invoice is pending — the paid one is not.
+    assert.equal(pending.at(-1), 1);
+    // Earlier days had no activity and read as zero rather than being omitted.
+    assert.deepEqual(today.slice(0, 6), [0, 0, 0, 0, 0, 0]);
+  });
+});

@@ -44,6 +44,29 @@ const buildDateFilter = ({ from, to } = {}) => {
 
 const sumTotal = (rows) => money(rows?.[0]?.total || 0);
 
+// $dateToString defaults to UTC, so an invoice dated at local midnight in IST lands on the
+// previous day's bucket. Group in the server's own offset instead, which is also what the
+// dense-fill keys below are generated in.
+const tzOffset = (date) => {
+  const minutes = -date.getTimezoneOffset();
+  const sign = minutes < 0 ? '-' : '+';
+  const abs = Math.abs(minutes);
+  return `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+};
+const localDateKey = (date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+// Turn sparse day buckets into one value per day from `start` to today, so a sparkline with
+// gaps reads as a flat stretch instead of a straight diagonal between two distant points.
+const denseSeries = (rows, start, end, field) => {
+  const byDay = new Map((rows || []).map((row) => [row._id, Number(row[field] || 0)]));
+  const series = [];
+  for (let day = startOfDay(start); day <= end; day = addDays(day, 1)) {
+    series.push(money(byDay.get(localDateKey(day)) || 0));
+  }
+  return series;
+};
+
 export const getReportSummary = async (businessId, range = {}) => {
   const rangeKey = range.from || range.to ? null : String(businessId);
   if (rangeKey) {
@@ -60,6 +83,7 @@ export const getReportSummary = async (businessId, range = {}) => {
   const monthStart = startOfMonth(now);
   const rangeDateFilter = buildDateFilter(range);
   const rangeLabel = rangeDateFilter ? 'Selected range' : 'Last 7 days';
+  const dayKey = (field) => ({ $dateToString: { format: '%Y-%m-%d', date: field, timezone: tzOffset(now) } });
 
   const activeDocumentFilter = { documentStatus: { $nin: ['cancelled', 'void'] } };
   // All active (non-cancelled) invoices, scoped to the range when one is set.
@@ -133,14 +157,34 @@ export const getReportSummary = async (businessId, range = {}) => {
         // Q1 sales trend (gross invoiced per day).
         invoicedTrend: [
           { $match: invoicedTrendFilter },
-          { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } }, sales: { $sum: '$total' }, invoices: { $sum: 1 } } },
+          { $group: { _id: dayKey('$date'), sales: { $sum: '$total' }, invoices: { $sum: 1 } } },
           { $sort: { _id: 1 } }
         ],
         // Legacy collected trend for Dashboard.
         legacyTrend: [
           { $match: legacyTrendFilter },
-          { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } }, sales: { $sum: collectedAmountExpr }, invoices: { $sum: 1 } } },
+          { $group: { _id: dayKey('$date'), sales: { $sum: collectedAmountExpr }, invoices: { $sum: 1 } } },
           { $sort: { _id: 1 } }
+        ],
+
+        // Per-metric daily series for the Dashboard metric-card sparklines. Each one is
+        // window-fixed (not range-bound) because those four cards always show today/month/
+        // all-time/pending regardless of any selected report range.
+        weekCollectedTrend: [
+          { $match: collectedWindowFilter(weekStart, tomorrow) },
+          { $group: { _id: dayKey('$date'), sales: { $sum: collectedAmountExpr } } }
+        ],
+        monthCollectedTrend: [
+          { $match: collectedWindowFilter(monthStart, tomorrow) },
+          { $group: { _id: dayKey('$date'), sales: { $sum: collectedAmountExpr } } }
+        ],
+        weekInvoiceCountTrend: [
+          { $match: invoicedWindow(weekStart, tomorrow) },
+          { $group: { _id: dayKey('$date'), invoices: { $sum: 1 } } }
+        ],
+        weekPendingCountTrend: [
+          { $match: { ...invoicedWindow(weekStart, tomorrow), status: 'pending' } },
+          { $group: { _id: dayKey('$date'), invoices: { $sum: 1 } } }
         ],
         recentInvoices: [{ $match: baseFilter }, { $sort: { createdAt: -1 } }, { $limit: 5 }],
 
@@ -206,7 +250,8 @@ export const getReportSummary = async (businessId, range = {}) => {
     today = [], weekly = [], monthly = [], rangeCollected = [],
     salesToday = [], salesWeek = [], salesMonth = [], salesRange = [],
     counts = [], topProducts = [], topCustomers = [], invoicedTrend = [], legacyTrend = [], recentInvoices = [],
-    duesByStatus = [], topDebtors = []
+    duesByStatus = [], topDebtors = [],
+    weekCollectedTrend = [], monthCollectedTrend = [], weekInvoiceCountTrend = [], weekPendingCountTrend = []
   } = invoiceFacet;
   const { collectedToday = [], collectedWeek = [], collectedMonth = [], collectedRange = [], paymentMethods = [] } = paymentFacet;
 
@@ -238,6 +283,14 @@ export const getReportSummary = async (businessId, range = {}) => {
     topProducts: topProducts.map((item) => ({ name: item._id, quantity: item.quantity, sales: money(item.sales) })),
     salesTrend: legacyTrend.map((item) => ({ date: item._id, sales: money(item.sales), invoices: item.invoices })),
     recentInvoices,
+
+    // One dense daily series per Dashboard metric card, so each sparkline shows its own metric.
+    metricTrends: {
+      today: denseSeries(weekCollectedTrend, weekStart, now, 'sales'),
+      month: denseSeries(monthCollectedTrend, monthStart, now, 'sales'),
+      invoices: denseSeries(weekInvoiceCountTrend, weekStart, now, 'invoices'),
+      pending: denseSeries(weekPendingCountTrend, weekStart, now, 'invoices')
+    },
 
     // --- Q1: How much did I sell? (invoiced/gross) ---
     sales: {
