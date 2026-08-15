@@ -74,6 +74,9 @@ const taxIdentifiersFrom = (source = {}) => ({
   taxId: source.taxId || ''
 });
 
+/** Printed label for a customerless (counter/cash) sale. Not a Customer record. */
+export const WALK_IN_CUSTOMER_NAME = 'Walk-in customer';
+
 const customerSnapshotFrom = (source) => {
   const billingAddress = addressSnapshotFrom(source.billingAddress, source.address);
   const shippingAddress = addressSnapshotFrom(source.shippingAddress, source.address);
@@ -107,6 +110,14 @@ export const buildCustomerSnapshot = async (businessId, payload, { session } = {
       customerId: customer._id,
       snapshot: customerSnapshotFrom(customer)
     };
+  }
+
+  // A counter/cash sale: no customer was chosen and none was typed in. The document stays
+  // genuinely customerless (customer: null, no Customer row is created) and only carries a
+  // label so lists, PDFs and reports have something to print — matching the null-customer
+  // bucket reportService already calls "Walk-in customer".
+  if (!payload.customer) {
+    return { customerId: null, snapshot: customerSnapshotFrom({ name: WALK_IN_CUSTOMER_NAME, phone: '' }) };
   }
 
   if (!payload.customer?.name || !payload.customer?.phone) {
@@ -415,7 +426,11 @@ export const buildInvoiceShareMessage = async (invoice, req) =>
   `Hello ${invoice.customerSnapshot.name}, your invoice is ready. Download here: ${await resolveShareablePdfUrl(invoice, req)}`;
 
 export const buildWhatsAppLink = async (invoice, req) => {
-  const phone = invoice.customerSnapshot.phone.replace(/[^\d]/g, '');
+  const phone = (invoice.customerSnapshot.phone || '').replace(/[^\d]/g, '');
+  // A walk-in sale has no number to send to; a wa.me link without one goes nowhere.
+  if (!phone) {
+    throw new ApiError(422, 'This invoice has no customer phone number to share to');
+  }
   const message = await buildInvoiceShareMessage(invoice, req);
   return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
 };

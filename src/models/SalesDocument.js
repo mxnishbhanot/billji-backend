@@ -22,7 +22,9 @@ const addressSnapshotSchema = new mongoose.Schema(
 const customerSnapshotSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
-    phone: { type: String, required: true, trim: true },
+    // Blank on a genuine counter/walk-in sale: the document has no customer at all
+    // (customer: null) and there is nobody to record a number for.
+    phone: { type: String, default: '', trim: true },
     countryCode: { type: String, default: '+91', trim: true },
     email: { type: String, default: '', trim: true, lowercase: true },
     address: { type: String, default: '', trim: true },

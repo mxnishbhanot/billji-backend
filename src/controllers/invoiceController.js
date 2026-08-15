@@ -40,8 +40,10 @@ const endOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.ge
 
 export const invoiceRules = [
   body('customerId').optional({ nullable: true }).isMongoId(),
-  body('customer.name').if(body('customerId').not().exists()).trim().notEmpty(),
-  body('customer.phone').if(body('customerId').not().exists()).trim().notEmpty(),
+  // Customer is optional entirely (walk-in / cash sale). But an inline customer, once
+  // given, still has to be complete — a half-typed one would print a nameless invoice.
+  body('customer.name').if(body('customer').exists()).trim().notEmpty(),
+  body('customer.phone').if(body('customer').exists()).trim().notEmpty(),
   body('items').isArray({ min: 1 }).withMessage('At least one item is required'),
   body('items.*.productId').optional({ nullable: true }).isMongoId(),
   body('items.*.name').optional().trim().isLength({ max: 120 }),
