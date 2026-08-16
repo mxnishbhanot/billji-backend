@@ -42,7 +42,7 @@ const customerSchema = new mongoose.Schema(
       taxId: { type: String, trim: true, maxlength: 64, default: '' }
     },
     contactPersons: { type: [contactPersonSchema], default: [] },
-    creditBalance: { type: Number, default: 0, min: 0 },
+    availableCredit: { type: Number, default: 0, min: 0 },
     outstandingDues: { type: Number, default: 0, min: 0 },
     isActive: { type: Boolean, default: true }
   },

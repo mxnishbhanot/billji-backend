@@ -3,11 +3,15 @@ import { logAudit } from '../../services/auditService.js';
 import { invalidateInvoicePdf } from '../../services/invoicePdfCache.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import {
+  applyCreditWorkflow,
+  getCustomerCredits,
   getCustomerOutstanding,
   listPayments,
   markInvoiceRefundProcessedWorkflow,
   recordCustomerPaymentWorkflow,
   recordInvoicePaymentWorkflow,
+  reverseCreditApplicationWorkflow,
+  serializeCreditResult,
   serializeCustomerPaymentResult,
   serializePaymentResult
 } from './service.js';
@@ -56,6 +60,44 @@ export const markInvoiceRefundProcessed = asyncHandler(async (req, res) => {
 export const listCustomerOutstanding = asyncHandler(async (req, res) => {
   const outstanding = await getCustomerOutstanding(req.business._id, req.params.customerId);
   res.json({ success: true, ...outstanding });
+});
+
+export const listCustomerCredits = asyncHandler(async (req, res) => {
+  const credits = await getCustomerCredits(req.business._id, req.params.customerId);
+  res.json({ success: true, ...credits });
+});
+
+export const applyCredit = asyncHandler(async (req, res) => {
+  const result = await applyCreditWorkflow({ req });
+  // Balance and the new "Credit applied" line changed — the cached PDF is stale.
+  void invalidateInvoicePdf(result.invoice);
+  void logAudit(req, {
+    action: 'payment.credit_applied',
+    resourceType: 'invoice',
+    resourceId: result.invoice._id,
+    metadata: { amount: result.appliedAmount, allocationIds: result.allocations.map((a) => a._id) }
+  });
+
+  res.status(201).json({
+    success: true,
+    ...serializeCreditResult({ ...result, invoice: serializeInvoice(result.invoice, req) })
+  });
+});
+
+export const reverseCreditApplication = asyncHandler(async (req, res) => {
+  const result = await reverseCreditApplicationWorkflow({ req });
+  void invalidateInvoicePdf(result.invoice);
+  void logAudit(req, {
+    action: 'payment.credit_application_reversed',
+    resourceType: 'settlement_allocation',
+    resourceId: req.params.allocationId,
+    metadata: { reversed: result.reversed, reason: req.body.reason || '' }
+  });
+
+  res.json({
+    success: true,
+    ...serializeCreditResult({ ...result, invoice: serializeInvoice(result.invoice, req) })
+  });
 });
 
 export const recordCustomerPayment = asyncHandler(async (req, res) => {

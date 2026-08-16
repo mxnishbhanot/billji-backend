@@ -6,7 +6,7 @@ import Customer from '../src/models/Customer.js';
 import DeviceSeries from '../src/models/DeviceSeries.js';
 import Invoice from '../src/models/Invoice.js';
 import Payment from '../src/models/Payment.js';
-import PaymentAllocation from '../src/models/PaymentAllocation.js';
+import SettlementAllocation from '../src/models/SettlementAllocation.js';
 import Product from '../src/models/Product.js';
 import { SYNC_DEVICE_HEADER, SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION } from '../src/modules/sync/protocol.js';
 import { useMongoTestDb } from './helpers/db.js';
@@ -117,7 +117,7 @@ describe('the same work arriving twice at once', () => {
     // Allocation is the server's, so it can total the bill but never exceed it.
     assert.ok(settled.paidAmount <= settled.total + 0.001, `paid ${settled.paidAmount} of ${settled.total}`);
     assert.equal(settled.balanceDue, Math.round((settled.total - settled.paidAmount) * 100) / 100);
-    const allocated = (await PaymentAllocation.find({ invoice: invoice._id })).reduce(
+    const allocated = (await SettlementAllocation.find({ invoice: invoice._id })).reduce(
       (sum, allocation) => sum + allocation.amount,
       0
     );

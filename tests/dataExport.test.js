@@ -221,6 +221,24 @@ describe('data export - csv', () => {
     assert.equal(rows[0][0], 'invoiceId');
   });
 
+  it('exports the credit counters alongside the money columns', async () => {
+    const mine = await seedBusiness({ customerName: 'Alpha Traders', shareToken: crypto.randomUUID() });
+    // 40 of this invoice came from customer credit, and a note has claimed 60 of it.
+    await Invoice.updateOne({ _id: mine.invoice._id }, { $set: { creditApplied: 40, creditedAmount: 60 } });
+
+    const { files } = await buildExportFiles(mine.business._id);
+    const rows = parseCsv(fileMap(files)['csv/invoices.csv']);
+    const header = rows[0];
+    const row = rows.find((entry) => entry[header.indexOf('invoiceId')] === String(mine.invoice._id));
+
+    // Money and credit stay separate columns, exactly as they are separate fields.
+    assert.equal(row[header.indexOf('paidAmount')], '100');
+    assert.equal(row[header.indexOf('creditApplied')], '40');
+    assert.equal(row[header.indexOf('creditedAmount')], '60');
+    assert.ok(header.includes('appliedAmount'), 'a credit note reports how much of it was spent');
+    assert.ok(header.includes('sourceInvoiceId'), 'a credit note names the invoice it credits');
+  });
+
   it('flattens line items into their own sheet keyed to the parent', async () => {
     const mine = await seedBusiness({ customerName: 'Alpha Traders', shareToken: crypto.randomUUID() });
     const { files } = await buildExportFiles(mine.business._id);

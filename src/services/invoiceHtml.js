@@ -115,13 +115,18 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   // or missing. Only 'partial' trusts the stored amount.
   const invoiceTotal = Number(invoice.total || 0);
   const paymentStatus = invoice.paymentStatus;
+  // Credit settles the invoice without money arriving, so a fully-settled invoice is not
+  // necessarily fully *paid*: 'paid' means total - creditApplied was received, not total.
+  // Printing the credit as cash would put a figure on the customer's copy that ties to no
+  // receipt at all.
+  const creditApplied = paymentStatus === 'unpaid' ? 0 : Number(invoice.creditApplied ?? 0);
   const paidAmount =
-    paymentStatus === 'paid' ? invoiceTotal
+    paymentStatus === 'paid' ? Math.max(invoiceTotal - creditApplied, 0)
     : paymentStatus === 'unpaid' ? 0
     : Number(invoice.paidAmount ?? 0);
   const balanceDue =
     paymentStatus === 'paid' ? 0
-    : Number(invoice.balanceDue ?? Math.max(invoiceTotal - paidAmount, 0));
+    : Number(invoice.balanceDue ?? Math.max(invoiceTotal - paidAmount - creditApplied, 0));
   const discountAmount = Number(invoice.discount?.amount || 0);
   const taxAmount = Number(invoice.tax?.amount || 0);
   const taxRate = Number(invoice.tax?.rate || 0);
@@ -234,6 +239,9 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
   }
   totalRows.push(`<div class="t-row t-total"><span>Total</span><span>${currency(invoice.total)}</span></div>`);
   if (showPaymentRows) totalRows.push(`<div class="t-row"><span>Paid</span><span>${currency(paidAmount)}</span></div>`);
+  if (showPaymentRows && creditApplied > 0) {
+    totalRows.push(`<div class="t-row"><span>Credit applied</span><span>${currency(creditApplied)}</span></div>`);
+  }
 
   const balanceHtml = showPaymentRows
     ? `<div class="t-balance"><span>Balance due</span><span>${currency(balanceDue)}</span></div>`

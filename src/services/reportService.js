@@ -111,7 +111,11 @@ export const getReportSummary = async (businessId, range = {}) => {
   const collectedNetSum = [{ $group: { _id: null, total: collectedNetExpr } }];
 
   // ----- Q3: Who OWES me? (snapshot of open balances, NOT range-bound) -----
-  const outstandingExpr = { $subtract: ['$total', { $ifNull: ['$paidAmount', 0] }] };
+  // Credit settles an invoice as surely as cash does, so it comes off what is owed here
+  // too. Collections (Q2) stay Payment-sourced, so credit never inflates cash collected.
+  const outstandingExpr = {
+    $subtract: ['$total', { $add: [{ $ifNull: ['$paidAmount', 0] }, { $ifNull: ['$creditApplied', 0] }] }]
+  };
   const duesMatch = { business: businessId, documentType: 'invoice', ...activeDocumentFilter, paymentStatus: { $in: ['unpaid', 'partial'] } };
 
   // One pass over this business's sales documents instead of sixteen. Every branch

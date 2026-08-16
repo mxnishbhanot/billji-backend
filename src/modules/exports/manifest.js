@@ -19,7 +19,7 @@ import NumberSequence from '../../models/NumberSequence.js';
 import OnboardingProgress from '../../models/OnboardingProgress.js';
 import Order from '../../models/Order.js';
 import Payment from '../../models/Payment.js';
-import PaymentAllocation from '../../models/PaymentAllocation.js';
+import SettlementAllocation from '../../models/SettlementAllocation.js';
 import Product from '../../models/Product.js';
 import Role from '../../models/Role.js';
 import SalesDocument from '../../models/SalesDocument.js';
@@ -164,7 +164,7 @@ export const EXPORT_COLLECTIONS = [
       { header: 'taxId', path: 'taxIdentifiers.taxId' },
       ...ADDRESS_COLUMNS('billingAddress', 'billing'),
       ...ADDRESS_COLUMNS('shippingAddress', 'shipping'),
-      { header: 'creditBalance', path: 'creditBalance' },
+      { header: 'availableCredit', path: 'availableCredit' },
       { header: 'outstandingDues', path: 'outstandingDues' },
       { header: 'isActive', path: 'isActive' },
       { header: 'createdAt', path: 'createdAt' },
@@ -212,6 +212,14 @@ export const EXPORT_COLLECTIONS = [
       { header: 'sourceOrderId', path: 'sourceOrder' },
       ...CUSTOMER_SNAPSHOT_COLUMNS,
       ...MONEY_COLUMNS,
+      // Credit counters live on the sales document but only on this export: `paidAmount` is
+      // money, `creditApplied` is credit spent settling this invoice, `creditedAmount` is how
+      // much of an invoice credit notes have claimed, and `appliedAmount` is how much of a
+      // credit note has been spent. Orders have none of these.
+      { header: 'creditApplied', path: 'creditApplied' },
+      { header: 'creditedAmount', path: 'creditedAmount' },
+      { header: 'appliedAmount', path: 'appliedAmount' },
+      { header: 'sourceInvoiceId', path: 'sourceInvoice' },
       { header: 'documentStatus', path: 'documentStatus' },
       { header: 'paymentStatus', path: 'paymentStatus' },
       { header: 'fulfillmentStatus', path: 'fulfillmentStatus' },
@@ -291,17 +299,20 @@ export const EXPORT_COLLECTIONS = [
     ]
   },
   {
-    name: 'payment_allocations',
-    model: PaymentAllocation,
+    name: 'settlement_allocations',
+    model: SettlementAllocation,
     select: '-__v',
     sort: { allocatedAt: 1, _id: 1 },
     csv: [
       { header: 'allocationId', path: '_id' },
+      { header: 'source', path: 'source' },
       { header: 'paymentId', path: 'payment' },
+      { header: 'creditNoteId', path: 'creditNote' },
       { header: 'invoiceId', path: 'invoice' },
       { header: 'customerId', path: 'customer' },
       { header: 'amount', path: 'amount' },
-      { header: 'allocatedAt', path: 'allocatedAt' }
+      { header: 'allocatedAt', path: 'allocatedAt' },
+      { header: 'reversedAt', path: 'reversedAt' }
     ]
   },
   {
@@ -352,7 +363,7 @@ export const EXPORT_COLLECTIONS = [
     csv: [
       { header: 'customerId', path: 'customer' },
       { header: 'outstandingDues', path: 'outstandingDues' },
-      { header: 'creditBalance', path: 'creditBalance' },
+      { header: 'availableCredit', path: 'availableCredit' },
       { header: 'currency', path: 'currency' },
       { header: 'lastCalculatedAt', path: 'lastCalculatedAt' }
     ]

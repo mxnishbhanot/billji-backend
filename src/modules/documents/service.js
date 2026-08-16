@@ -1,4 +1,5 @@
 import Invoice from '../../models/Invoice.js';
+import StockMovement from '../../models/StockMovement.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { DOMAIN_EVENTS, publishDomainEvent } from '../../services/eventBus.js';
@@ -8,8 +9,16 @@ import {
   stockAdjustmentsForInvoice
 } from '../../services/invoiceService.js';
 import { createInvoiceRecord } from '../invoices/repository.js';
-import { publishInvoiceIssuedEvent, publishStockAdjustedEvents } from '../invoices/service.js';
-import { createLedgerEntries, customerBalanceTotals, updateCustomerBalance } from '../payments/repository.js';
+import { publishInvoiceIssuedEvent, publishStockAdjustedEvents, reverseLedgerEntries } from '../invoices/service.js';
+import {
+  applicationsForCreditNote,
+  claimCreditOnInvoice,
+  createLedgerEntries,
+  customerBalanceTotals,
+  ledgerEntriesForCreditNote,
+  releaseCreditOnInvoice,
+  updateCustomerBalance
+} from '../payments/repository.js';
 import { rulesFor } from './documentTypes.js';
 
 const money = (value) => Math.round((Number(value) || 0) * 100) / 100;
@@ -23,34 +32,75 @@ export const getDocumentForBusiness = async (businessId, documentId, documentTyp
 };
 
 /**
- * A credit note may not exceed what the invoice was actually worth, after any earlier
- * credit notes. Over-crediting would hand the customer more back than they ever paid and
- * would file a negative supply in GSTR-1.
+ * The invoice a quotation or challan was converted into, if any. Mirrors findInvoiceForOrder:
+ * the link already exists on the invoice (sourceDocument), this only makes it readable from
+ * the source side. Scoped to the business, so it can never reach another tenant's invoice.
  */
-const assertCreditNoteWithinInvoice = async (businessId, invoice, amount, { session } = {}) => {
-  const existing = await Invoice.aggregate([
-    { $match: { business: businessId, documentType: 'credit_note', sourceInvoice: invoice._id, documentStatus: 'issued' } },
-    { $group: { _id: null, total: { $sum: '$total' } } }
+export const findInvoiceForDocument = (businessId, documentId, { session } = {}) =>
+  Invoice.findOne({ business: businessId, documentType: 'invoice', sourceDocument: documentId })
+    .select('invoiceNumber documentNumber status date')
+    .session(session || null);
+
+/**
+ * What this document actually did to stock, read from the movements it wrote rather than
+ * inferred from the rules table. The difference is real: a line only moves stock when it
+ * points at a product that is not `trackStock: false`, so a challan of custom lines moves
+ * nothing at all and a UI that reads the rules row alone would claim otherwise.
+ *
+ * `sale` rows are the deduction, `sale_cancelled` rows the reversal cancellation wrote —
+ * the same two types stockAdjustmentsForInvoice records for every sales document.
+ */
+export const stockEffectForDocument = async (businessId, documentId, { session } = {}) => {
+  const rows = await StockMovement.aggregate([
+    { $match: { business: businessId, salesDocument: documentId } },
+    { $group: { _id: '$type', products: { $addToSet: '$product' }, quantity: { $sum: '$quantityChange' } } }
   ]).session(session || null);
 
-  const alreadyCredited = money(existing[0]?.total || 0);
-  const remaining = money(Number(invoice.total || 0) - alreadyCredited);
+  const deducted = rows.find((row) => row._id === 'sale');
+  const restored = rows.find((row) => row._id === 'sale_cancelled');
 
-  if (money(amount) > remaining) {
-    throw new ApiError(409, `Credit note exceeds the invoice. At most ${remaining} can still be credited.`, {
-      code: 'CREDIT_NOTE_EXCEEDS_INVOICE',
-      invoiceTotal: money(invoice.total),
-      alreadyCredited,
-      remaining
-    });
-  }
+  return {
+    products: deducted?.products.length || 0,
+    quantity: Math.abs(deducted?.quantity || 0),
+    reversed: Boolean(restored)
+  };
 };
 
 /**
- * Ledger entries for a credit note: the mirror image of an invoice's own posting.
- * Revenue is debited back and the customer's receivable is credited, so the net effect of
- * invoice + full credit note is zero — the same compensating-entry approach cancellation
- * uses, rather than editing or deleting the original rows.
+ * A credit note may not exceed what the invoice was actually worth, after any earlier
+ * credit notes. Over-crediting would hand the customer more back than they ever paid and
+ * would file a negative supply in GSTR-1.
+ *
+ * The room is claimed on the invoice's own `creditedAmount` counter with a compare-and-set,
+ * not checked with an aggregate first: an aggregate-then-insert leaves a window in which two
+ * concurrent notes both read the same "already credited" figure and both pass.
+ */
+const claimCreditNoteRoomOnInvoice = async (businessId, invoice, amount, { session } = {}) => {
+  const claimed = await claimCreditOnInvoice(businessId, invoice, amount, { session });
+  if (claimed) return claimed;
+
+  // Only to describe the failure — the decision was already made by the update above.
+  const current = await Invoice.findOne({ _id: invoice._id, business: businessId }).select('total creditedAmount').lean();
+  const alreadyCredited = money(current?.creditedAmount || 0);
+  const remaining = money(money(current?.total || invoice.total) - alreadyCredited);
+
+  throw new ApiError(409, `Credit note exceeds the invoice. At most ${remaining} can still be credited.`, {
+    code: 'CREDIT_NOTE_EXCEEDS_INVOICE',
+    invoiceTotal: money(invoice.total),
+    alreadyCredited,
+    remaining
+  });
+};
+
+/**
+ * Ledger entries for a credit note: revenue is debited back, and the value returned to the
+ * customer is booked as a liability on `customer_credits` — the same account an overpayment
+ * already credits.
+ *
+ * It does NOT credit `accounts_receivable`. Until the credit is explicitly applied the
+ * customer still owes the invoice in full and the business separately owes them the credit,
+ * which is exactly what these two rows say. Crediting the receivable here would assert the
+ * debt was settled and would disagree with the balance formula by the credit amount.
  */
 const postCreditNoteLedger = (req, creditNote, sourceInvoiceNumber, { session } = {}) =>
   createLedgerEntries(
@@ -77,17 +127,29 @@ const postCreditNoteLedger = (req, creditNote, sourceInvoiceNumber, { session } 
         invoice: creditNote.sourceInvoice || null,
         sourceType: 'credit_note',
         sourceId: creditNote._id,
-        account: 'accounts_receivable',
+        account: 'customer_credits',
         direction: 'credit',
         amount: money(creditNote.total),
         currency: 'INR',
         entryDate: creditNote.date || new Date(),
-        description: `Credit note ${creditNote.documentNumber} receivable reversal`,
+        description: `Customer credit from credit note ${creditNote.documentNumber}`,
         createdBy: req.user._id
       }
     ],
     { session }
   );
+
+/**
+ * Recomputes the customer's outstanding/credit from source. customerBalanceTotals
+ * already ignores cancelled and void documents, so the same call both applies a
+ * newly issued credit note and takes a cancelled one back off the books.
+ * A counter/cash sale has no Customer record, so there is nothing to refresh.
+ */
+const refreshCustomerBalanceForDocument = async (req, document, { session } = {}) => {
+  if (!document.customer) return null;
+  const totals = await customerBalanceTotals(req.business._id, document.customer, { session });
+  return updateCustomerBalance(req.business._id, document.customer, totals, { session, actorId: req.user._id });
+};
 
 /**
  * Creates a quotation, delivery challan or credit note.
@@ -129,32 +191,39 @@ export const createDocumentWorkflow = ({ req, documentType }) => {
     );
 
     if (sourceInvoice) {
-      await assertCreditNoteWithinInvoice(req.business._id, sourceInvoice, payload.total, { session });
+      await claimCreditNoteRoomOnInvoice(req.business._id, sourceInvoice, payload.total, { session });
     }
 
-    const document = await createInvoiceRecord(payload, { session });
-    await setInvoicePdfUrl(document, req, { session });
+    try {
+      const document = await createInvoiceRecord(payload, { session });
+      await setInvoicePdfUrl(document, req, { session });
 
-    let movements = [];
-    if (rules.stockDirection !== 0) {
-      movements = await stockAdjustmentsForInvoice(document, rules.stockDirection, {
-        session,
-        allowOversell: Boolean(req.body.allowOversell)
-      });
-    }
-
-    if (rules.postsLedger) {
-      await postCreditNoteLedger(req, document, sourceInvoice?.invoiceNumber, { session });
-      if (document.customer) {
-        const totals = await customerBalanceTotals(req.business._id, document.customer, { session });
-        await updateCustomerBalance(req.business._id, document.customer, totals, { session, actorId: req.user._id });
+      let movements = [];
+      if (rules.stockDirection !== 0) {
+        movements = await stockAdjustmentsForInvoice(document, rules.stockDirection, {
+          session,
+          allowOversell: Boolean(req.body.allowOversell)
+        });
       }
+
+      if (rules.postsLedger) {
+        await postCreditNoteLedger(req, document, sourceInvoice?.invoiceNumber, { session });
+        await refreshCustomerBalanceForDocument(req, document, { session });
+      }
+
+      await publishInvoiceIssuedEvent(req, document, { session, suffix: documentType });
+      if (movements.length) await publishStockAdjustedEvents(req, movements, { session });
+
+      return document;
+    } catch (error) {
+      // With a transaction the claim rolls back with everything else. Without one (the dev
+      // fallback) it has already committed, so the room must be handed back explicitly or
+      // the invoice stays permanently short of credit room it never granted.
+      if (!session && sourceInvoice) {
+        await releaseCreditOnInvoice(req.business._id, sourceInvoice._id, payload.total).catch(() => null);
+      }
+      throw error;
     }
-
-    await publishInvoiceIssuedEvent(req, document, { session, suffix: documentType });
-    if (movements.length) await publishStockAdjustedEvents(req, movements, { session });
-
-    return document;
   });
 };
 
@@ -175,11 +244,7 @@ export const convertDocumentWorkflow = ({ req, documentType }) => {
     // Checked before the status guard: converting sets the source to 'void', so a second
     // attempt must report "already invoiced" (with the invoice to look at) rather than the
     // misleading "cancelled".
-    const existing = await Invoice.findOne({
-      business: req.business._id,
-      documentType: 'invoice',
-      sourceDocument: source._id
-    }).session(session || null);
+    const existing = await findInvoiceForDocument(req.business._id, source._id, { session });
 
     if (existing) {
       throw new ApiError(409, `This ${rules.label.toLowerCase()} has already been invoiced`, {
@@ -252,6 +317,23 @@ export const cancelDocumentWorkflow = ({ req, documentType }) => {
       throw new ApiError(409, `This ${rules.label.toLowerCase()} was already converted to an invoice`, { code: 'DOCUMENT_CONVERTED' });
     }
 
+    // A credit note with live applications cannot be cancelled (§9): cascading the
+    // reversal would silently re-open invoices that may since have been paid, filed or
+    // shared. Reversing each application is a separate, individually-audited act.
+    if (documentType === 'credit_note' && money(document.appliedAmount) > 0) {
+      const applications = await applicationsForCreditNote(req.business._id, document._id, { session });
+      throw new ApiError(409, 'Reverse the credit applied from this note before cancelling it', {
+        code: 'CREDIT_NOTE_HAS_APPLICATIONS',
+        total: money(document.total),
+        appliedAmount: money(document.appliedAmount),
+        remaining: money(money(document.total) - money(document.appliedAmount)),
+        applications: applications.map((application) => ({
+          invoiceNumber: application.invoice?.invoiceNumber || application.invoice?.documentNumber || '',
+          amount: application.amount
+        }))
+      });
+    }
+
     document.documentStatus = 'cancelled';
     document.cancelledAt = new Date();
     document.cancelledBy = req.user._id;
@@ -265,7 +347,26 @@ export const cancelDocumentWorkflow = ({ req, documentType }) => {
     const movements =
       rules.stockDirection === 0 ? [] : await stockAdjustmentsForInvoice(document, -rules.stockDirection, { session });
 
+    // A credit note posted ledger rows and moved the customer's balance when it
+    // was issued; cancelling has to undo both, or the customer keeps a credit the
+    // note no longer grants. Compensating entries (never deletes), exactly as an
+    // invoice cancellation does. Saved first so the balance recompute — which
+    // filters on documentStatus — sees this note as cancelled.
+    const ledgerEntries = rules.postsLedger
+      ? await ledgerEntriesForCreditNote(req.business._id, document._id, { session })
+      : [];
+
     await document.save({ session });
+
+    // A cancelled note no longer credits its source invoice, so the room it claimed goes
+    // back — otherwise the invoice could never be credited for that value again.
+    if (documentType === 'credit_note' && document.sourceInvoice) {
+      await releaseCreditOnInvoice(req.business._id, document.sourceInvoice, document.total, { session });
+    }
+
+    if (ledgerEntries.length) await reverseLedgerEntries(req, document, ledgerEntries, { session });
+    if (rules.postsLedger) await refreshCustomerBalanceForDocument(req, document, { session });
+
     await publishDomainEvent(
       {
         business: req.business._id,

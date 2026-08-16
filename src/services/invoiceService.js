@@ -39,7 +39,10 @@ export const buildPublicInvoicePdfUrl = (invoice, req) => {
 export const serializeInvoice = (invoice, req) => {
   const data = invoice.toObject ? invoice.toObject() : invoice;
   const paidAmount = data.paidAmount ?? (data.paymentStatus === 'paid' || data.paymentStatus === 'refunded' ? data.total : 0);
-  const balanceDue = data.balanceDue ?? Math.max(Number(data.total || 0) - Number(paidAmount || 0), 0);
+  // Money and credit are separate settlement figures: "Paid" means cash arrived.
+  const creditApplied = data.creditApplied ?? 0;
+  const balanceDue =
+    data.balanceDue ?? Math.max(Number(data.total || 0) - Number(paidAmount || 0) - Number(creditApplied || 0), 0);
 
   const documentType = data.documentType || 'invoice';
 
@@ -51,6 +54,7 @@ export const serializeInvoice = (invoice, req) => {
     ...(documentType === 'invoice' ? { invoiceNumber: invoice.invoiceNumber || invoice.documentNumber } : {}),
     status: invoice.status || legacyStatusFor(invoice),
     paidAmount,
+    creditApplied,
     balanceDue,
     pdfUrl: buildPublicInvoicePdfUrl(invoice, req)
   };

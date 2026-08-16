@@ -7,7 +7,7 @@ import IdempotencyKey from '../src/models/IdempotencyKey.js';
 import Invoice from '../src/models/Invoice.js';
 import LedgerEntry from '../src/models/LedgerEntry.js';
 import Payment from '../src/models/Payment.js';
-import PaymentAllocation from '../src/models/PaymentAllocation.js';
+import SettlementAllocation from '../src/models/SettlementAllocation.js';
 import Product from '../src/models/Product.js';
 import StockMovement from '../src/models/StockMovement.js';
 import { IDEMPOTENCY_HEADER } from '../src/contracts/phase0Architecture.js';
@@ -168,7 +168,7 @@ describe('invoice API quality coverage', () => {
     assert.equal(await LedgerEntry.countDocuments({ business: business._id, invoice: invoiceId, sourceType: 'adjustment' }), reversalsAfterCancel);
     const balanceAfter = await CustomerBalance.findOne({ business: business._id, customer: customer._id }).lean();
     assert.equal(balanceAfter.outstandingDues, balanceBefore.outstandingDues);
-    assert.equal(balanceAfter.creditBalance, balanceBefore.creditBalance);
+    assert.equal(balanceAfter.availableCredit, balanceBefore.availableCredit);
 
     // Nothing left pending → second mark is a 409.
     await api()
@@ -281,7 +281,7 @@ describe('payment and draft quality coverage', () => {
     assert.equal(paymentResponse.body.invoice.paymentStatus, 'partial');
     assert.equal(paymentResponse.body.invoice.paidAmount, 100);
     assert.equal(paymentResponse.body.invoice.balanceDue, 136);
-    assert.equal(await PaymentAllocation.countDocuments({ invoice: invoiceId }), 1);
+    assert.equal(await SettlementAllocation.countDocuments({ invoice: invoiceId }), 1);
     assert.equal(await LedgerEntry.countDocuments({ invoice: invoiceId }), 2);
     assert.equal((await CustomerBalance.findOne({ customer: customer._id }).lean()).outstandingDues, 136);
 
@@ -294,7 +294,7 @@ describe('payment and draft quality coverage', () => {
       .expect(201);
 
     assert.equal(replay.body.payment._id, paymentResponse.body.payment._id);
-    assert.equal(await PaymentAllocation.countDocuments({ invoice: invoiceId }), 1);
+    assert.equal(await SettlementAllocation.countDocuments({ invoice: invoiceId }), 1);
   });
 
   it('supports draft upsert, list, and delete contracts', async () => {

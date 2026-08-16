@@ -142,6 +142,12 @@ export const salesDocumentSchema = new mongoose.Schema(
     },
     total: { type: Number, required: true, min: 0 },
     paidAmount: { type: Number, default: 0, min: 0 },
+    // Credit-note counters. On a credit note: `appliedAmount` is how much of it has been
+    // consumed. On an invoice: `creditedAmount` is the credit-note value raised against it,
+    // `creditApplied` is the credit used to settle it. Nothing reads them yet.
+    appliedAmount: { type: Number, default: 0, min: 0 },
+    creditedAmount: { type: Number, default: 0, min: 0 },
+    creditApplied: { type: Number, default: 0, min: 0 },
     balanceDue: { type: Number, default: 0, min: 0 },
     documentStatus: { type: String, enum: DOCUMENT_STATUSES, default: 'issued', index: true },
     paymentStatus: { type: String, enum: PAYMENT_STATUSES, default: 'unpaid', index: true },

@@ -14,6 +14,18 @@ export const customerPaymentParamRules = [
   param('customerId').isMongoId().withMessage('Valid customer id is required')
 ];
 
+export const allocationParamRules = [
+  param('allocationId').isMongoId().withMessage('Valid allocation id is required')
+];
+
+export const applyCreditRules = [
+  body('amount').isFloat({ min: 0.01 }).withMessage('Credit amount must be greater than zero').toFloat()
+];
+
+export const reverseAllocationRules = [
+  body('reason').optional({ nullable: true }).trim().isLength({ max: 200 })
+];
+
 export const recordCustomerPaymentRules = [
   body('amount').isFloat({ min: 0.01 }).withMessage('Payment amount must be greater than zero').toFloat(),
   body('invoiceIds').isArray({ min: 1 }).withMessage('At least one invoice is required'),

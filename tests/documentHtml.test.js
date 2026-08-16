@@ -42,3 +42,44 @@ test('an invoice is unchanged — no watermark, no disclaimer, payment rows inta
   assert.ok(!html.includes('NOT A TAX INVOICE'));
   assert.match(html, /Balance due/);
 });
+
+// The printed sheet has to say where the settlement came from: "Paid" is money the customer
+// handed over, "Credit applied" is credit they already held. Merging them would put a figure
+// on their copy that ties to no receipt.
+const creditedInvoice = {
+  ...baseDocument,
+  documentType: 'invoice',
+  invoiceNumber: 'INV-0002',
+  total: 1000,
+  tax: { rate: 0, amount: 0 },
+  subtotal: 1000
+};
+
+test('an invoice settled partly by credit prints the credit as its own line', () => {
+  const html = buildInvoiceHtml(
+    { ...creditedInvoice, paymentStatus: 'partial', paidAmount: 200, creditApplied: 300, balanceDue: 500 },
+    {}
+  );
+
+  assert.match(html, /<span>Paid<\/span><span>[^<]*200/);
+  assert.match(html, /<span>Credit applied<\/span><span>[^<]*300/);
+  assert.match(html, /<span>Balance due<\/span><span>[^<]*500/);
+});
+
+test('an invoice settled entirely by credit reports no money received', () => {
+  const html = buildInvoiceHtml(
+    { ...creditedInvoice, paymentStatus: 'paid', paidAmount: 0, creditApplied: 1000, balanceDue: 0 },
+    {}
+  );
+
+  // 'paid' used to mean "the whole total was received"; with credit that is no longer true.
+  assert.match(html, /<span>Paid<\/span><span>[^<]*0\.00/);
+  assert.match(html, /<span>Credit applied<\/span><span>[^<]*1,000/);
+});
+
+test('an invoice with no credit prints exactly what it printed before', () => {
+  const html = buildInvoiceHtml({ ...creditedInvoice, paymentStatus: 'partial', paidAmount: 400, balanceDue: 600 }, {});
+
+  assert.ok(!html.includes('Credit applied'));
+  assert.match(html, /<span>Paid<\/span><span>[^<]*400/);
+});

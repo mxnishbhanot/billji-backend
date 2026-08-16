@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import request from 'supertest';
 import app from '../src/app.js';
 import Payment from '../src/models/Payment.js';
-import PaymentAllocation from '../src/models/PaymentAllocation.js';
+import SettlementAllocation from '../src/models/SettlementAllocation.js';
 import { IDEMPOTENCY_HEADER } from '../src/contracts/phase0Architecture.js';
 import { useMongoTestDb } from './helpers/db.js';
 import { authHeader, createCustomer, createProduct, createTestContext, invoicePayload } from './helpers/fixtures.js';
@@ -37,7 +37,7 @@ describe('invoice status mutation guard', () => {
 
     assert.equal(res.body.details?.code, 'PAYMENT_STATUS_VIA_PAYMENTS');
     assert.equal(await Payment.countDocuments({ business: business._id }), 0);
-    assert.equal(await PaymentAllocation.countDocuments({ business: business._id }), 0);
+    assert.equal(await SettlementAllocation.countDocuments({ business: business._id }), 0);
   });
 
   it('rejects pending status that would wipe paidAmount without touching allocations', async () => {

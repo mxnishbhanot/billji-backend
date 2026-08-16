@@ -37,8 +37,9 @@ export const customerRules = [
   body('contactPersons.*.role').optional({ nullable: true }).trim().isLength({ max: 80 }),
   body('contactPersons.*.phone').optional({ nullable: true }).trim().isLength({ max: 24 }),
   body('contactPersons.*.email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(EMAIL_NORMALIZE),
-  body('creditBalance').optional().isFloat({ min: 0 }),
-  body('outstandingDues').optional().isFloat({ min: 0 }),
+  // `availableCredit` and `outstandingDues` are deliberately absent: they are derived by
+  // the server from invoices, allocations and credit notes. A balance a client can set to
+  // an arbitrary number is not a balance.
   body('isActive').optional().isBoolean().toBoolean()
 ];
 
@@ -129,8 +130,6 @@ const customerPayload = (body) => {
     };
   }
   if (hasOwn(body, 'contactPersons')) payload.contactPersons = compactContacts(body.contactPersons);
-  if (hasOwn(body, 'creditBalance')) payload.creditBalance = Number(body.creditBalance || 0);
-  if (hasOwn(body, 'outstandingDues')) payload.outstandingDues = Number(body.outstandingDues || 0);
   if (hasOwn(body, 'isActive')) payload.isActive = Boolean(body.isActive);
 
   return payload;

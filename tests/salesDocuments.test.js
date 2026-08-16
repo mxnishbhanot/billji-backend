@@ -8,6 +8,7 @@ import Product from '../src/models/Product.js';
 import StockMovement from '../src/models/StockMovement.js';
 import Customer from '../src/models/Customer.js';
 import { IDEMPOTENCY_HEADER } from '../src/contracts/phase0Architecture.js';
+import { getReportSummary, invalidateReportSummaryCache } from '../src/services/reportService.js';
 import { useMongoTestDb } from './helpers/db.js';
 import { authHeader, createCustomer, createProduct, createTestContext } from './helpers/fixtures.js';
 
@@ -57,6 +58,20 @@ const setup = async () => {
 };
 
 const stockOf = async (productId) => (await Product.findById(productId).lean()).stockQuantity;
+
+const cancelDocument = (token, type, id, expectStatus = 200) =>
+  api().post(`/api/v1/documents/${type}/${id}/cancel`).set(authHeader(token)).send({}).expect(expectStatus);
+
+const duesOf = async (customerId) => (await Customer.findById(customerId).lean()).outstandingDues;
+
+const creditOf = async (customerId) => (await Customer.findById(customerId).lean()).availableCredit;
+
+// Net movement of a document's ledger rows on one account: originals plus the
+// compensating 'adjustment' rows cancellation posts. Zero means "no live effect".
+const ledgerNet = async (documentId, account) => {
+  const entries = await LedgerEntry.find({ salesDocument: documentId, account }).lean();
+  return entries.reduce((sum, entry) => sum + (entry.direction === 'credit' ? entry.amount : -entry.amount), 0);
+};
 
 describe('quotation', () => {
   it('uses its own number series and never touches stock or the ledger', async () => {
@@ -110,6 +125,44 @@ describe('quotation', () => {
       .set(idempotent('convert'))
       .expect(409);
   });
+
+  it('resolves the invoice it was converted into, and only that invoice', async () => {
+    const { token, customer, product } = await setup();
+    const { document } = await createDocument(token, 'quotation', documentPayload(customer, product));
+
+    // Before conversion there is nothing to link to.
+    const before = await api().get(`/api/v1/documents/quotation/${document._id}`).set(authHeader(token)).expect(200);
+    assert.equal(before.body.document.linkedInvoice, null);
+
+    // An unrelated invoice exists alongside it and must never be picked up.
+    const unrelated = await createInvoice(token, customer, product);
+
+    const converted = await api()
+      .post(`/api/v1/documents/quotation/${document._id}/convert`)
+      .set(authHeader(token))
+      .set(idempotent('convert'))
+      .expect(201);
+
+    const after = await api().get(`/api/v1/documents/quotation/${document._id}`).set(authHeader(token)).expect(200);
+    assert.equal(after.body.document.linkedInvoice.id, converted.body.invoice._id);
+    assert.equal(after.body.document.linkedInvoice.invoiceNumber, converted.body.invoice.invoiceNumber);
+    assert.notEqual(after.body.document.linkedInvoice.id, unrelated._id);
+  });
+
+  it('does not leak a converted invoice to another business or to an anonymous caller', async () => {
+    const { token, customer, product } = await setup();
+    const { document } = await createDocument(token, 'quotation', documentPayload(customer, product));
+    await api()
+      .post(`/api/v1/documents/quotation/${document._id}/convert`)
+      .set(authHeader(token))
+      .set(idempotent('convert'))
+      .expect(201);
+
+    // A second business cannot even read the quotation, so it can never read its invoice.
+    const other = await createTestContext();
+    await api().get(`/api/v1/documents/quotation/${document._id}`).set(authHeader(other.token)).expect(404);
+    await api().get(`/api/v1/documents/quotation/${document._id}`).expect(401);
+  });
 });
 
 describe('delivery challan', () => {
@@ -147,6 +200,44 @@ describe('delivery challan', () => {
 
     assert.equal(await stockOf(product._id), 100);
   });
+
+  // The detail response reports what the document did to stock from the movements it wrote,
+  // so a client states a fact instead of inferring one from the document type.
+  it('reports the stock it actually moved, and the reversal once cancelled', async () => {
+    const { token, customer, product } = await setup();
+    const { document } = await createDocument(token, 'delivery_challan', documentPayload(customer, product));
+
+    const issued = await api().get(`/api/v1/documents/delivery_challan/${document._id}`).set(authHeader(token)).expect(200);
+    assert.deepEqual(issued.body.document.stockEffect, { products: 1, quantity: 2, reversed: false });
+
+    await api().post(`/api/v1/documents/delivery_challan/${document._id}/cancel`).set(authHeader(token)).send({}).expect(200);
+
+    const cancelled = await api().get(`/api/v1/documents/delivery_challan/${document._id}`).set(authHeader(token)).expect(200);
+    assert.deepEqual(cancelled.body.document.stockEffect, { products: 1, quantity: 2, reversed: true });
+  });
+
+  // A line with no tracked product moves nothing, which is exactly the case a rules-table
+  // guess gets wrong.
+  it('reports no stock movement for a challan of untracked lines', async () => {
+    const { token, customer } = await setup();
+    const { document } = await createDocument(token, 'delivery_challan', {
+      customerId: customer._id.toString(),
+      items: [{ name: 'Loading charges', quantity: 1, price: 200, taxRate: 5 }],
+      discountType: 'flat',
+      discountValue: 0
+    });
+
+    const res = await api().get(`/api/v1/documents/delivery_challan/${document._id}`).set(authHeader(token)).expect(200);
+    assert.deepEqual(res.body.document.stockEffect, { products: 0, quantity: 0, reversed: false });
+  });
+
+  it('reports no stock effect on a document type that never moves stock', async () => {
+    const { token, customer, product } = await setup();
+    const { document } = await createDocument(token, 'quotation', documentPayload(customer, product));
+
+    const res = await api().get(`/api/v1/documents/quotation/${document._id}`).set(authHeader(token)).expect(200);
+    assert.equal(res.body.document.stockEffect, undefined);
+  });
 });
 
 describe('credit note', () => {
@@ -167,14 +258,17 @@ describe('credit note', () => {
 
     const entries = await LedgerEntry.find({ business: business._id, sourceType: 'credit_note' }).lean();
     assert.equal(entries.length, 2);
+    // Revenue reversed and a liability to the customer created. The receivable on the
+    // source invoice is untouched: they still owe it until the credit is applied.
     assert.deepEqual(
       entries.map((entry) => `${entry.account}:${entry.direction}`).sort(),
-      ['accounts_receivable:credit', 'sales:debit']
+      ['customer_credits:credit', 'sales:debit']
     );
+    assert.equal(entries.filter((entry) => entry.account === 'accounts_receivable').length, 0);
     assert.equal(entries[0].amount, 1050);
   });
 
-  it('reduces the customer due by the credited amount', async () => {
+  it('leaves the due standing and creates applicable credit instead', async () => {
     const { token, customer, product } = await setup();
     const invoice = await createInvoice(token, customer, product);
 
@@ -185,9 +279,36 @@ describe('credit note', () => {
       sourceInvoiceId: invoice._id
     });
 
-    // Invoice 1050 minus credit 525. (The balance is recomputed on credit-note creation;
-    // plain invoice creation leaves it to the payment path, as it always has.)
-    assert.equal((await Customer.findById(customer._id).lean()).outstandingDues, 525);
+    // No auto-apply: the customer still owes the full invoice, and separately holds 525
+    // of credit they can choose to spend. Both are non-zero at once.
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(await creditOf(customer._id), 525);
+  });
+
+  it('keeps every outstanding surface agreeing after a credit note', async () => {
+    const { business, token, customer, product } = await setup();
+    const invoice = await createInvoice(token, customer, product);
+
+    await createDocument(token, 'credit_note', {
+      customerId: customer._id.toString(),
+      items: [{ productId: product._id.toString(), quantity: 1, price: 500, taxRate: 5, hsn: '1006' }],
+      sourceInvoiceId: invoice._id
+    });
+
+    const outstanding = await api()
+      .get(`/api/v1/payments/customers/${customer._id}/outstanding`)
+      .set(authHeader(token))
+      .expect(200);
+
+    invalidateReportSummaryCache(business._id);
+    const report = await getReportSummary(business._id);
+
+    // The denormalised mirror, the per-invoice allocation walk and the report aggregate
+    // all read the same number — the defect that made them disagree was the credit note
+    // netting off in only one of them.
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(outstanding.body.totalOutstanding, 1050);
+    assert.equal(report.dues.totalOutstanding, 1050);
   });
 
   it('rejects a credit note that exceeds what is left on the invoice', async () => {
@@ -226,6 +347,152 @@ describe('credit note', () => {
       .set(idempotent('credit_note'))
       .send(documentPayload(customer, product, { sourceInvoiceId: invoice._id }))
       .expect(409);
+  });
+
+  it('takes the credit off the books when the credit note is cancelled', async () => {
+    const { token, customer, product } = await setup();
+    const invoice = await createInvoice(token, customer, product);
+    const { document } = await createDocument(
+      token,
+      'credit_note',
+      documentPayload(customer, product, { sourceInvoiceId: invoice._id })
+    );
+
+    // The invoice was never reduced by the note, so only the credit moves.
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(await creditOf(customer._id), 1050);
+
+    await cancelDocument(token, 'credit_note', document._id);
+
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(await creditOf(customer._id), 0);
+  });
+
+  it('leaves no live ledger effect once the credit note is cancelled', async () => {
+    const { token, customer, product } = await setup();
+    const invoice = await createInvoice(token, customer, product);
+    const { document } = await createDocument(
+      token,
+      'credit_note',
+      documentPayload(customer, product, { sourceInvoiceId: invoice._id })
+    );
+
+    // Issued: customer credit created, sales debited.
+    assert.equal(await ledgerNet(document._id, 'customer_credits'), 1050);
+    assert.equal(await ledgerNet(document._id, 'sales'), -1050);
+
+    await cancelDocument(token, 'credit_note', document._id);
+
+    // Originals kept for audit, compensating entries net them to zero.
+    assert.equal(await ledgerNet(document._id, 'customer_credits'), 0);
+    assert.equal(await ledgerNet(document._id, 'sales'), 0);
+    assert.equal(await LedgerEntry.countDocuments({ salesDocument: document._id, sourceType: 'credit_note' }), 2);
+    assert.equal(await LedgerEntry.countDocuments({ salesDocument: document._id, sourceType: 'adjustment' }), 2);
+  });
+
+  it('takes the returned stock back out when the credit note is cancelled', async () => {
+    const { token, customer, product } = await setup();
+    const invoice = await createInvoice(token, customer, product);
+    const { document } = await createDocument(
+      token,
+      'credit_note',
+      documentPayload(customer, product, { sourceInvoiceId: invoice._id })
+    );
+    assert.equal(await stockOf(product._id), 100);
+
+    await cancelDocument(token, 'credit_note', document._id);
+
+    assert.equal(await stockOf(product._id), 98);
+  });
+
+  it('cannot reverse twice when cancelled repeatedly', async () => {
+    const { token, customer, product } = await setup();
+    const invoice = await createInvoice(token, customer, product);
+    const { document } = await createDocument(
+      token,
+      'credit_note',
+      documentPayload(customer, product, { sourceInvoiceId: invoice._id })
+    );
+
+    await cancelDocument(token, 'credit_note', document._id);
+    await cancelDocument(token, 'credit_note', document._id);
+    await cancelDocument(token, 'credit_note', document._id);
+
+    assert.equal(await LedgerEntry.countDocuments({ salesDocument: document._id, sourceType: 'adjustment' }), 2);
+    assert.equal(await ledgerNet(document._id, 'customer_credits'), 0);
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(await creditOf(customer._id), 0);
+    assert.equal(await stockOf(product._id), 98);
+    assert.equal(await StockMovement.countDocuments({ salesDocument: document._id }), 2);
+  });
+
+  it('withdraws a partial credit note\'s credit when it is cancelled', async () => {
+    const { token, customer, product } = await setup();
+    const invoice = await createInvoice(token, customer, product);
+
+    // One of the two units comes back.
+    const { document } = await createDocument(token, 'credit_note', {
+      customerId: customer._id.toString(),
+      items: [{ productId: product._id.toString(), quantity: 1, price: 500, taxRate: 5, hsn: '1006' }],
+      sourceInvoiceId: invoice._id
+    });
+
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(await creditOf(customer._id), 525);
+    assert.equal(await stockOf(product._id), 99);
+
+    await cancelDocument(token, 'credit_note', document._id);
+
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(await creditOf(customer._id), 0);
+    assert.equal(await stockOf(product._id), 98);
+    assert.equal(await ledgerNet(document._id, 'customer_credits'), 0);
+  });
+
+  it('cancels a credit note whose lines are custom, with no product to restock', async () => {
+    const { token, customer, product } = await setup();
+    const invoice = await createInvoice(token, customer, product);
+
+    const { document } = await createDocument(token, 'credit_note', {
+      customerId: customer._id.toString(),
+      items: [{ name: 'Freight refund', quantity: 1, price: 200, taxRate: 5 }],
+      sourceInvoiceId: invoice._id
+    });
+
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(await creditOf(customer._id), 210);
+    // Nothing to move: a custom line has no product behind it.
+    assert.equal(await StockMovement.countDocuments({ salesDocument: document._id }), 0);
+
+    await cancelDocument(token, 'credit_note', document._id);
+
+    assert.equal(await duesOf(customer._id), 1050);
+    assert.equal(await creditOf(customer._id), 0);
+    assert.equal(await stockOf(product._id), 98);
+    assert.equal(await ledgerNet(document._id, 'customer_credits'), 0);
+    assert.equal(await StockMovement.countDocuments({ salesDocument: document._id }), 0);
+  });
+
+  it('cancels a credit note that belongs to no customer record', async () => {
+    const { token, customer, product } = await setup();
+    const invoice = await createInvoice(token, customer, product);
+
+    // A typed-in buyer: snapshot only, no Customer row to carry a balance.
+    const { document } = await createDocument(token, 'credit_note', {
+      customer: { name: 'Counter Buyer', phone: '9000000009' },
+      items: [{ productId: product._id.toString(), quantity: 2, price: 500, taxRate: 5, hsn: '1006' }],
+      sourceInvoiceId: invoice._id
+    });
+    assert.equal(document.customer, null);
+    assert.equal(await stockOf(product._id), 100);
+
+    await cancelDocument(token, 'credit_note', document._id);
+
+    assert.equal(await stockOf(product._id), 98);
+    assert.equal(await ledgerNet(document._id, 'customer_credits'), 0);
+    // The named customer's own balance was never touched by a note that is not theirs.
+    assert.equal(await duesOf(customer._id), 0);
+    assert.equal(await creditOf(customer._id), 0);
   });
 
   it('inherits the original supply place, so the reversal files against the same state', async () => {

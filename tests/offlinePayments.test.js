@@ -6,7 +6,7 @@ import CustomerBalance from '../src/models/CustomerBalance.js';
 import Invoice from '../src/models/Invoice.js';
 import LedgerEntry from '../src/models/LedgerEntry.js';
 import Payment from '../src/models/Payment.js';
-import PaymentAllocation from '../src/models/PaymentAllocation.js';
+import SettlementAllocation from '../src/models/SettlementAllocation.js';
 import { SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION } from '../src/modules/sync/protocol.js';
 import { useMongoTestDb } from './helpers/db.js';
 import { authHeader, createCustomer, createTestContext } from './helpers/fixtures.js';
@@ -75,7 +75,7 @@ describe('pushing a receipt taken offline', () => {
     assert.equal(invoice.paymentStatus, 'partial');
 
     // None of these came from the device.
-    assert.equal(await PaymentAllocation.countDocuments({ invoice: invoiceId }), 1);
+    assert.equal(await SettlementAllocation.countDocuments({ invoice: invoiceId }), 1);
     assert.ok((await LedgerEntry.countDocuments({ business: business._id })) >= 2, 'double entry posted');
     const balance = await CustomerBalance.findOne({ business: business._id, customer: customer._id });
     assert.ok(balance, 'the customer balance was recomputed');
@@ -94,7 +94,7 @@ describe('pushing a receipt taken offline', () => {
     assert.equal(second.body.results[0].status, 'ok');
     assert.equal(second.body.results[0].serverId, first.body.results[0].serverId);
     assert.equal(await Payment.countDocuments({ business: business._id }), 1);
-    assert.equal(await PaymentAllocation.countDocuments({ invoice: invoiceId }), 1);
+    assert.equal(await SettlementAllocation.countDocuments({ invoice: invoiceId }), 1);
     // The decisive assertion: the bill was settled once, not twice.
     assert.equal((await Invoice.findById(invoiceId)).paidAmount, 400);
   });
@@ -162,7 +162,7 @@ describe('pushing a receipt taken offline', () => {
     assert.equal((await Invoice.findById(first)).paymentStatus, 'paid');
     assert.equal((await Invoice.findById(second)).paidAmount, 400);
     assert.equal((await Invoice.findById(second)).balanceDue, 200);
-    assert.equal(await PaymentAllocation.countDocuments({ business: business._id }), 2);
+    assert.equal(await SettlementAllocation.countDocuments({ business: business._id }), 2);
   });
 
   it('re-splits a dues collection itself when another till got there first', async () => {

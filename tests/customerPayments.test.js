@@ -118,7 +118,7 @@ describe('customer payment allocation', () => {
 
     assert.equal(res.body.payment.allocatedAmount, 1500);
     assert.equal(res.body.payment.unappliedAmount, 300);
-    assert.equal(res.body.customerBalance.creditBalance, 300);
+    assert.equal(res.body.customerBalance.availableCredit, 300);
     assert.equal(res.body.customerBalance.outstandingDues, 0);
 
     const fresh = await fetchInvoice(token, newInvoice._id);

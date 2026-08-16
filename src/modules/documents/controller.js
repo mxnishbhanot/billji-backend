@@ -8,8 +8,16 @@ import { serializeInvoice } from '../../services/invoiceService.js';
 import { emitBusinessEvent } from '../../services/socketService.js';
 import { buildSearchRegex } from '../../utils/searchRegex.js';
 import { paginateQuery, UNPAGINATED_LIST_CAP, wantsPagination } from '../../utils/pagination.js';
+import { applicationsForCreditNote } from '../payments/repository.js';
 import { DOCUMENT_KINDS, rulesFor } from './documentTypes.js';
-import { cancelDocumentWorkflow, convertDocumentWorkflow, createDocumentWorkflow, getDocumentForBusiness } from './service.js';
+import {
+  cancelDocumentWorkflow,
+  convertDocumentWorkflow,
+  createDocumentWorkflow,
+  findInvoiceForDocument,
+  getDocumentForBusiness,
+  stockEffectForDocument
+} from './service.js';
 
 // documentType arrives in the path so each type keeps its own permissioned route rather
 // than being smuggled through a body field.
@@ -76,8 +84,48 @@ export const listDocuments = asyncHandler(async (req, res) => {
 
 export const getDocument = asyncHandler(async (req, res) => {
   const documentType = documentTypeFrom(req);
+  const rules = rulesFor(documentType);
   const document = await getDocumentForBusiness(req.business._id, req.params.id, documentType);
-  res.json({ success: true, document: serializeInvoice(document, req) });
+
+  // A convertible document (quotation, challan) records its link on the invoice it produced,
+  // so the source side can only answer "which invoice came from me?" by looking it up. Same
+  // shape the order detail already returns, and only the fields the UI needs to deep-link.
+  // A document that moves stock reports what it actually moved, so the client states a fact
+  // instead of inferring one from the document type.
+  const [linkedInvoice, stockEffect, applications] = await Promise.all([
+    rules.convertsTo ? findInvoiceForDocument(req.business._id, document._id) : null,
+    rules.stockDirection === 0 ? null : stockEffectForDocument(req.business._id, document._id),
+    // A credit note's detail has to answer "where did my credit go?", which only the
+    // allocation rows know. `remaining` is derived here and never stored.
+    documentType === 'credit_note' ? applicationsForCreditNote(req.business._id, document._id) : null
+  ]);
+
+  res.json({
+    success: true,
+    document: {
+      ...serializeInvoice(document, req),
+      ...(applications
+        ? {
+            remaining: Math.max(Number(document.total || 0) - Number(document.appliedAmount || 0), 0),
+            applications: applications.map((application) => ({
+              allocationId: application._id,
+              invoiceId: application.invoice?._id || application.invoice,
+              invoiceNumber: application.invoice?.invoiceNumber || application.invoice?.documentNumber || '',
+              amount: application.amount,
+              allocatedAt: application.allocatedAt
+            }))
+          }
+        : {}),
+      ...(rules.convertsTo
+        ? {
+            linkedInvoice: linkedInvoice
+              ? { id: linkedInvoice._id, invoiceNumber: linkedInvoice.invoiceNumber || linkedInvoice.documentNumber, status: linkedInvoice.status }
+              : null
+          }
+        : {}),
+      ...(stockEffect ? { stockEffect } : {})
+    }
+  });
 });
 
 export const createDocument = asyncHandler(async (req, res) => {
