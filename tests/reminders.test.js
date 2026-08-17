@@ -89,15 +89,16 @@ describe('pending reminder list', () => {
     assert.ok(reminders[0].daysOverdue >= 20);
   });
 
-  it('leaves out paid, cancelled, not-yet-due, revoked and phoneless invoices', async () => {
+  it('leaves out paid, cancelled, revoked and phoneless invoices, but keeps every open one', async () => {
     const { business } = await createTestContext();
 
     await createInvoice(business, { paymentStatus: 'paid', paidAmount: 1000, balanceDue: 0 });
     await createInvoice(business, { documentStatus: 'cancelled' });
-    await createInvoice(business, { dueDate: new Date(Date.now() + 5 * DAY_MS) });
+    // Open but not due yet, and open with no due date at all: both still chaseable, so the
+    // list totals match the dashboard's outstanding figure.
+    await createInvoice(business, { total: 700, dueDate: new Date(Date.now() + 5 * DAY_MS) });
     await createInvoice(business, { shareRevokedAt: new Date() });
-    // Recent, no due date — not yet old enough to chase.
-    await createInvoice(business, { dueDate: null, createdAt: daysAgo(2) });
+    await createInvoice(business, { total: 300, dueDate: null, createdAt: daysAgo(2) });
     // customerSnapshot.phone is required by the schema, so a phoneless invoice can only
     // come from a legacy/imported row. Insert one raw to prove the guard still holds.
     await Invoice.collection.insertOne({
@@ -120,7 +121,8 @@ describe('pending reminder list', () => {
 
     const { reminders, skippedWithoutPhone } = await listPendingReminders(business._id);
 
-    assert.equal(reminders.length, 0);
+    assert.deepEqual(reminders.map((row) => row.balanceDue), [700, 300]);
+    assert.deepEqual(reminders.map((row) => row.reason), ['pending', 'pending']);
     assert.equal(skippedWithoutPhone, 1);
   });
 

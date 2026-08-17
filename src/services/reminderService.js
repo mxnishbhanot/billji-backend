@@ -6,9 +6,6 @@ import { resolveShareablePdfUrl } from './invoiceService.js';
 import { materializeReminderNotifications } from './notificationService.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-// Invoices with no due date are only worth chasing once they have aged; matches the
-// 'old-pending-invoice' rule in notificationService so the bell and this list agree.
-const OLD_PENDING_DAYS = 7;
 const SHARE_LINK_TTL_MS = 30 * DAY_MS;
 // A reminder should not go out with a link that dies tomorrow.
 const SHARE_LINK_MIN_REMAINING_MS = 7 * DAY_MS;
@@ -45,22 +42,23 @@ export const renderReminderMessage = ({ template, name, invoiceNumber, amount, l
   return String(template || DEFAULT_REMINDER_TEMPLATE).replace(/\{(name|invoice|amount|link|business|days)\}/g, (_match, token) => values[token]);
 };
 
-const pendingReminderFilter = (businessId, today) => ({
+// Every open invoice is chaseable, so this list matches the dashboard's outstanding
+// figure. Rows carry `reason`, so the UI can still separate overdue from not-yet-due.
+// The bell keeps its stricter age rule in notificationService — a notification is a nag, a list is not.
+const pendingReminderFilter = (businessId) => ({
   business: businessId,
   documentType: 'invoice',
   documentStatus: 'issued',
   paymentStatus: { $in: ['unpaid', 'partial'] },
   // A revoked link means the owner deliberately cut off access — never re-share it.
-  shareRevokedAt: null,
-  $or: [
-    { dueDate: { $lt: today } },
-    { dueDate: null, createdAt: { $lte: new Date(today.getTime() - OLD_PENDING_DAYS * DAY_MS) } }
-  ]
+  shareRevokedAt: null
 });
 
 const reminderRow = (invoice, today) => {
   const dueDate = invoice.dueDate || null;
   const balance = Number(invoice.balanceDue ?? Math.max(Number(invoice.total || 0) - Number(invoice.paidAmount || 0), 0));
+  // Not-yet-due invoices are aged from when they were raised, same as ones with no due date.
+  const overdue = Boolean(dueDate) && startOfDay(dueDate) < today;
 
   return {
     invoiceId: String(invoice._id),
@@ -72,8 +70,8 @@ const reminderRow = (invoice, today) => {
     total: Number(invoice.total || 0),
     balanceDue: balance,
     dueDate,
-    daysOverdue: daysBetween(dueDate || invoice.createdAt || invoice.date, today),
-    reason: dueDate ? 'overdue' : 'pending'
+    daysOverdue: daysBetween(overdue ? dueDate : invoice.createdAt || invoice.date, today),
+    reason: overdue ? 'overdue' : 'pending'
   };
 };
 
@@ -83,7 +81,7 @@ const reminderRow = (invoice, today) => {
  */
 export const listPendingReminders = async (businessId, { limit = 200 } = {}) => {
   const today = startOfDay();
-  const invoices = await Invoice.find(pendingReminderFilter(businessId, today))
+  const invoices = await Invoice.find(pendingReminderFilter(businessId))
     .sort({ dueDate: 1, createdAt: 1 })
     .limit(limit)
     .lean();
@@ -133,7 +131,7 @@ export const sendReminders = async ({ req, invoiceIds }) => {
     { $set: { shareExpiresAt: new Date(now.getTime() + SHARE_LINK_TTL_MS) } }
   );
 
-  const invoices = await Invoice.find({ ...pendingReminderFilter(businessId, today), _id: { $in: ids } });
+  const invoices = await Invoice.find({ ...pendingReminderFilter(businessId), _id: { $in: ids } });
   const template = req.business.reminderTemplate || DEFAULT_REMINDER_TEMPLATE;
   const reminders = [];
 
