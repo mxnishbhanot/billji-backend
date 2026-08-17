@@ -148,6 +148,15 @@ export const salesDocumentSchema = new mongoose.Schema(
     appliedAmount: { type: Number, default: 0, min: 0 },
     creditedAmount: { type: Number, default: 0, min: 0 },
     creditApplied: { type: Number, default: 0, min: 0 },
+    // Settlement capacity already reserved on this invoice: the sum of its live allocations,
+    // whatever funded them. It exists so a single compare-and-set can enforce
+    // `settled + amount <= total` before an allocation is written — the same guard
+    // `creditedAmount` gives credit notes. Kept as one field rather than compared against
+    // `paidAmount + creditApplied` so the predicate stays a plain comparison.
+    //
+    // Every settlement path rewrites it from the authoritative allocation totals, so a value
+    // that ever drifts is repaired by the next write rather than compounding.
+    settledAmount: { type: Number, default: 0, min: 0 },
     balanceDue: { type: Number, default: 0, min: 0 },
     documentStatus: { type: String, enum: DOCUMENT_STATUSES, default: 'issued', index: true },
     paymentStatus: { type: String, enum: PAYMENT_STATUSES, default: 'unpaid', index: true },
@@ -192,6 +201,21 @@ salesDocumentSchema.pre('validate', function syncCompatibilityFields(next) {
     });
   }
 
+  next();
+});
+
+/**
+ * `settledAmount` is server-owned: it is a reservation counter, moved only by the atomic
+ * `$inc` of a settlement claim or its release, never by a document save.
+ *
+ * Without this hook a save would write it anyway in the one case that matters most. A
+ * document written before the field existed has no value stored, so hydrating it applies the
+ * schema default of 0 and marks the path modified — and the next unrelated `save()` on that
+ * invoice would push 0 over capacity another workflow has already reserved, which is exactly
+ * the over-settlement the claim exists to prevent.
+ */
+salesDocumentSchema.pre('save', function keepSettledAmountServerOwned(next) {
+  if (!this.isNew) this.unmarkModified('settledAmount');
   next();
 });
 

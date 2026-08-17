@@ -3,19 +3,25 @@ import { invalidateInvoicePdf } from '../../services/invoicePdfCache.js';
 import { DOMAIN_EVENTS, publishDomainEvent } from '../../services/eventBus.js';
 import StockMovement from '../../models/StockMovement.js';
 import {
+  closeInvoiceForCancellation,
   createLedgerEntries,
   customerBalanceTotals,
   invoiceHasLedgerEntries,
   invoiceHasPayments,
   ledgerEntriesForInvoice,
+  liveAllocationsForInvoice,
   liveCreditNoteCountForInvoice,
   markInvoicePaymentsRefundPending,
-  updateCustomerBalance
+  reopenCancelledInvoice,
+  updateCustomerBalance,
+  withdrawUnappliedCreditForInvoice
 } from '../payments/repository.js';
-import { reverseCreditApplicationsForInvoice } from '../payments/service.js';
+import { refundCrossInvoiceAllocationsForInvoice, reverseCreditApplicationsForInvoice } from '../payments/service.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { createInvoiceRecord, deleteInvoiceRecord } from './repository.js';
+
+const money = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
 const invoiceHasStockMovements = (businessId, invoiceId, { session } = {}) =>
   StockMovement.exists({ business: businessId, invoice: invoiceId }).session(session || null);
@@ -177,12 +183,77 @@ export const reverseLedgerEntries = (req, document, entries, { session, note = '
   return createLedgerEntries(reversals, { session });
 };
 
-const reverseLedgerForInvoice = async (req, invoice, { session } = {}) =>
-  reverseLedgerEntries(req, invoice, await ledgerEntriesForInvoice(req.business._id, invoice._id, { session }), { session });
+/**
+ * Compensate the invoice's own ledger rows on cancellation.
+ *
+ * Every row is mirrored at its original amount except two, both of which belong to a receipt
+ * as a whole rather than to this invoice alone:
+ *
+ * - `customer_credits` is mirrored only for the credit this cancellation actually withdrew
+ *   (`withdrawn`, keyed by payment). Credit already spent on another invoice was discharged
+ *   by that application's own debit; mirroring the full original row as well would compensate
+ *   the same liability twice, drive the account negative, and leave the ledger disagreeing
+ *   with `availableCredit` by the amount already spent.
+ * - the cash/bank debit is mirrored only for this invoice's share of the receipt: what it
+ *   still holds as a live allocation plus what was just withdrawn from the same receipt. A
+ *   receipt that settled several invoices posts ONE cash debit for the whole amount, so
+ *   mirroring it in full would say cash still settling other, live invoices had gone back out.
+ *   For a single-invoice receipt the share is the whole row, so nothing changes there.
+ */
+const CASH_ACCOUNTS = new Set(['cash', 'bank']);
 
-// Cancel preserves the invoice (audit) while reversing its business effects:
-// restore stock, post compensating ledger entries, and flag any payments as
-// refund-pending. Payment records themselves are never deleted or auto-refunded.
+const reverseLedgerForInvoice = async (req, invoice, withdrawn = new Map(), { session } = {}) => {
+  const entries = await ledgerEntriesForInvoice(req.business._id, invoice._id, { session });
+  const remaining = new Map(withdrawn);
+
+  const allocations = await liveAllocationsForInvoice(req.business._id, invoice._id, { session });
+  const cashShare = new Map(withdrawn);
+  for (const allocation of allocations) {
+    if (allocation.source !== 'payment' || !allocation.payment) continue;
+    const key = String(allocation.payment);
+    cashShare.set(key, money(money(cashShare.get(key)) + money(allocation.amount)));
+  }
+
+  // Mirror at most `left` of this row, tracking what is still owed per receipt.
+  const bounded = (budget, entry) => {
+    const key = String(entry.payment || '');
+    const left = money(budget.get(key));
+    const amount = money(Math.min(money(entry.amount), left));
+    if (amount <= 0) return null;
+    budget.set(key, money(left - amount));
+    return amount === money(entry.amount) ? entry : { ...entry, amount };
+  };
+
+  const compensated = [];
+  for (const entry of entries) {
+    if (entry.account === 'customer_credits') {
+      const row = bounded(remaining, entry);
+      if (row) compensated.push(row);
+      continue;
+    }
+    if (entry.direction === 'debit' && CASH_ACCOUNTS.has(entry.account)) {
+      const row = bounded(cashShare, entry);
+      if (row) compensated.push(row);
+      continue;
+    }
+    compensated.push(entry);
+  }
+
+  return reverseLedgerEntries(req, invoice, compensated, { session });
+};
+
+/**
+ * Cancel preserves the invoice (audit) while reversing its business effects: restore stock,
+ * post compensating ledger entries, and flag any payments as refund-pending. Payment records
+ * themselves are never deleted or auto-refunded.
+ *
+ * The cancelled status is committed FIRST, in one compare-and-set, before anything is
+ * reversed. It used to be mutated in memory and saved at the very end, which meant MongoDB
+ * reported the invoice as 'issued' for the whole duration of the unwind — long enough for a
+ * concurrent payment, dues collection, credit application or credit note to pass its own
+ * status guard and land on an invoice that was already being cancelled. Closing the document
+ * up front is what makes those guards mean something without a transaction to serialise them.
+ */
 export const cancelInvoiceWorkflow = ({ req }) =>
   withTransaction(async (session) => {
     const invoice = await getInvoiceForBusiness(req.business._id, req.params.id, { session });
@@ -203,35 +274,87 @@ export const cancelInvoiceWorkflow = ({ req }) =>
       });
     }
 
-    invoice.updatedBy = req.user._id;
-    // Set documentStatus only — the pre-validate hook derives legacy `status`
-    // ('cancelled') from it. paidAmount/balanceDue are left intact so the audit
-    // trail shows exactly what was paid before cancellation.
-    invoice.documentStatus = 'cancelled';
-    invoice.cancelledAt = new Date();
-    invoice.cancelledBy = req.user._id;
-    // Revoke any public share link so a cancelled invoice can't be sent/viewed
-    // through a previously-issued link.
-    invoice.shareRevokedAt = new Date();
-    if (typeof req.body?.cancelReason === 'string') {
-      invoice.cancelReason = req.body.cancelReason.trim().slice(0, 500);
+    // What to put back if a guard that can only be evaluated after the transition refuses.
+    const before = {
+      documentStatus: invoice.documentStatus,
+      status: invoice.status,
+      cancelledAt: invoice.cancelledAt,
+      cancelledBy: invoice.cancelledBy,
+      shareRevokedAt: invoice.shareRevokedAt,
+      cancelReason: invoice.cancelReason,
+      updatedBy: req.user._id
+    };
+
+    const cancelledAt = new Date();
+    // `status` is written explicitly: the pre-validate hook that derives it from
+    // documentStatus does not run on a query-path update. paidAmount/balanceDue are left
+    // intact so the audit trail shows exactly what was paid before cancellation, and the
+    // share link is revoked so a cancelled invoice cannot be viewed through it.
+    const cancelled = await closeInvoiceForCancellation(
+      req.business._id,
+      invoice._id,
+      {
+        documentStatus: 'cancelled',
+        status: 'cancelled',
+        cancelledAt,
+        cancelledBy: req.user._id,
+        shareRevokedAt: cancelledAt,
+        updatedBy: req.user._id,
+        ...(typeof req.body?.cancelReason === 'string'
+          ? { cancelReason: req.body.cancelReason.trim().slice(0, 500) }
+          : {})
+      },
+      { session }
+    );
+    // Lost the race to a concurrent cancellation — idempotent, same as the check above.
+    if (!cancelled) return getInvoiceForBusiness(req.business._id, req.params.id, { session });
+
+    // A credit note raised in the same instant would have passed its own `documentStatus:
+    // 'issued'` claim just before the transition landed. Re-checking after it is what makes
+    // the two decisions ordered; the note wins and the cancellation is put back.
+    const racedCreditNotes = await liveCreditNoteCountForInvoice(req.business._id, invoice._id, { session });
+    if (racedCreditNotes) {
+      await reopenCancelledInvoice(req.business._id, invoice._id, before, { session });
+      throw new ApiError(409, 'Cancel the credit notes raised against this invoice first', {
+        code: 'INVOICE_HAS_CREDIT_NOTES',
+        creditNoteCount: racedCreditNotes
+      });
     }
 
-    const movements = await stockAdjustmentsForInvoice(invoice, 1, { session });
-    // Credit applied to this invoice goes back to the customer's pool before the rest of
-    // the unwind; cash stays put and is flagged for refund below.
-    await reverseCreditApplicationsForInvoice(req, invoice, { session });
-    await reverseLedgerForInvoice(req, invoice, { session });
-    await markInvoicePaymentsRefundPending(req.business._id, invoice._id, { session });
-    await invoice.save({ session });
-    await refreshCustomerBalanceForInvoice(req, invoice, { session });
-    await publishInvoiceCancelledEvent(req, invoice, { session });
+    const movements = await stockAdjustmentsForInvoice(cancelled, 1, { session });
+
+    // ponytail: bounded sweep, three passes. No new settlement can pass the status predicate
+    // now, so the only rows that can still appear are from workflows that claimed capacity
+    // before the transition committed and are writing their allocation right now. Under a
+    // real transaction the write conflict on this document removes the window entirely; this
+    // is what covers the no-session fallback. Upgrade path if it ever proves too narrow: a
+    // dedicated in-flight counter on the invoice, claimed and released alongside capacity.
+    for (let pass = 0; pass < 3; pass += 1) {
+      // Credit applied to this invoice goes back to the customer's pool.
+      const reversed = await reverseCreditApplicationsForInvoice(req, cancelled, { session });
+      // Cash that reached this invoice through a receipt booked against another invoice
+      // becomes refundable on that receipt — without this it would settle nothing, be
+      // spendable nowhere, and simply disappear.
+      const refunded = await refundCrossInvoiceAllocationsForInvoice(req, cancelled, { session });
+      if (!reversed && !refunded.length) break;
+    }
+
+    // Credit this invoice's own receipts still hold stops being spendable and becomes cash
+    // owed back, so the same money is never both applicable credit and a pending refund.
+    // Runs before the ledger unwind because the compensating `customer_credits` entry is
+    // bounded by exactly what was withdrawn here, and before the refund flag because both
+    // select the same receipts.
+    const withdrawn = await withdrawUnappliedCreditForInvoice(req.business._id, cancelled._id, { session });
+    await reverseLedgerForInvoice(req, cancelled, withdrawn, { session });
+    await markInvoicePaymentsRefundPending(req.business._id, cancelled._id, { session });
+    await refreshCustomerBalanceForInvoice(req, cancelled, { session });
+    await publishInvoiceCancelledEvent(req, cancelled, { session });
     await publishStockAdjustedEvents(req, movements, { session });
 
     // Cancelling re-renders the PDF (CANCELLED watermark / status) — drop the cache.
-    void invalidateInvoicePdf(invoice);
+    void invalidateInvoicePdf(cancelled);
 
-    return invoice;
+    return cancelled;
   });
 
 // Delete = permanent removal, allowed ONLY for draft/unprocessed invoices with

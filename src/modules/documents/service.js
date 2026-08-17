@@ -13,10 +13,12 @@ import { publishInvoiceIssuedEvent, publishStockAdjustedEvents, reverseLedgerEnt
 import {
   applicationsForCreditNote,
   claimCreditOnInvoice,
+  closeCreditNoteForCancellation,
   createLedgerEntries,
   customerBalanceTotals,
   ledgerEntriesForCreditNote,
   releaseCreditOnInvoice,
+  reopenCancelledCreditNote,
   updateCustomerBalance
 } from '../payments/repository.js';
 import { rulesFor } from './documentTypes.js';
@@ -317,55 +319,102 @@ export const cancelDocumentWorkflow = ({ req, documentType }) => {
       throw new ApiError(409, `This ${rules.label.toLowerCase()} was already converted to an invoice`, { code: 'DOCUMENT_CONVERTED' });
     }
 
-    // A credit note with live applications cannot be cancelled (§9): cascading the
-    // reversal would silently re-open invoices that may since have been paid, filed or
-    // shared. Reversing each application is a separate, individually-audited act.
-    if (documentType === 'credit_note' && money(document.appliedAmount) > 0) {
-      const applications = await applicationsForCreditNote(req.business._id, document._id, { session });
-      throw new ApiError(409, 'Reverse the credit applied from this note before cancelling it', {
-        code: 'CREDIT_NOTE_HAS_APPLICATIONS',
-        total: money(document.total),
-        appliedAmount: money(document.appliedAmount),
-        remaining: money(money(document.total) - money(document.appliedAmount)),
-        applications: applications.map((application) => ({
-          invoiceNumber: application.invoice?.invoiceNumber || application.invoice?.documentNumber || '',
-          amount: application.amount
-        }))
-      });
-    }
+    const cancelledAt = new Date();
+    const patch = {
+      documentStatus: 'cancelled',
+      status: 'cancelled', // explicit: a query-path update skips pre('validate'), which is what derives this normally
+      cancelledAt,
+      cancelledBy: req.user._id,
+      shareRevokedAt: cancelledAt,
+      updatedBy: req.user._id,
+      ...(typeof req.body?.cancelReason === 'string' ? { cancelReason: req.body.cancelReason.trim().slice(0, 500) } : {})
+    };
 
-    document.documentStatus = 'cancelled';
-    document.cancelledAt = new Date();
-    document.cancelledBy = req.user._id;
-    document.shareRevokedAt = new Date();
-    document.updatedBy = req.user._id;
-    if (typeof req.body?.cancelReason === 'string') {
-      document.cancelReason = req.body.cancelReason.trim().slice(0, 500);
+    let cancelled;
+    if (documentType === 'credit_note') {
+      // Atomic close-first (§F-1, mirrors cancelInvoiceWorkflow): the "no live application"
+      // guard (§9) and the status transition are ONE compare-and-set, keyed on the same
+      // appliedAmount counter claimCreditFromNote claims. The old read-appliedAmount-then-save
+      // ordering left a window where a concurrent application could claim credit from a note
+      // that was mid-cancellation, or vice versa. See closeCreditNoteForCancellation.
+      cancelled = await closeCreditNoteForCancellation(req.business._id, document._id, patch, { session });
+
+      if (!cancelled) {
+        // Lost the race, or a live application blocks cancellation — re-read from the
+        // database, never the stale `document`, to tell an idempotent no-op from the 409.
+        const fresh = await getDocumentForBusiness(req.business._id, document._id, documentType, { session });
+        if (fresh.documentStatus === 'cancelled') return fresh;
+        if (fresh.documentStatus === 'void') {
+          throw new ApiError(409, `This ${rules.label.toLowerCase()} was already converted to an invoice`, {
+            code: 'DOCUMENT_CONVERTED'
+          });
+        }
+
+        const applications = await applicationsForCreditNote(req.business._id, fresh._id, { session });
+        throw new ApiError(409, 'Reverse the credit applied from this note before cancelling it', {
+          code: 'CREDIT_NOTE_HAS_APPLICATIONS',
+          total: money(fresh.total),
+          appliedAmount: money(fresh.appliedAmount),
+          remaining: money(money(fresh.total) - money(fresh.appliedAmount)),
+          applications: applications.map((application) => ({
+            invoiceNumber: application.invoice?.invoiceNumber || application.invoice?.documentNumber || '',
+            amount: application.amount
+          }))
+        });
+      }
+
+      // Belt-and-braces: appliedAmount was 0 the instant the transition landed, and
+      // claimCreditFromNote always claims that same counter before writing an allocation —
+      // so no live application can exist now. If this ever fires, the invariant above broke;
+      // treat it as the race it would be rather than ship a cancelled note still being consumed.
+      const stranded = await applicationsForCreditNote(req.business._id, cancelled._id, { session });
+      if (stranded.length) {
+        await reopenCancelledCreditNote(
+          req.business._id,
+          cancelled._id,
+          {
+            documentStatus: document.documentStatus,
+            status: document.status,
+            cancelledAt: document.cancelledAt,
+            cancelledBy: document.cancelledBy,
+            shareRevokedAt: document.shareRevokedAt,
+            cancelReason: document.cancelReason,
+            updatedBy: req.user._id
+          },
+          { session }
+        );
+        throw new ApiError(409, 'Reverse the credit applied from this note before cancelling it', {
+          code: 'CREDIT_NOTE_HAS_APPLICATIONS'
+        });
+      }
+    } else {
+      Object.assign(document, patch);
+      cancelled = document;
     }
 
     // Put back whatever the document moved when it was issued.
     const movements =
-      rules.stockDirection === 0 ? [] : await stockAdjustmentsForInvoice(document, -rules.stockDirection, { session });
+      rules.stockDirection === 0 ? [] : await stockAdjustmentsForInvoice(cancelled, -rules.stockDirection, { session });
 
-    // A credit note posted ledger rows and moved the customer's balance when it
-    // was issued; cancelling has to undo both, or the customer keeps a credit the
-    // note no longer grants. Compensating entries (never deletes), exactly as an
-    // invoice cancellation does. Saved first so the balance recompute — which
-    // filters on documentStatus — sees this note as cancelled.
+    // A credit note posted ledger rows and moved the customer's balance when it was issued;
+    // cancelling has to undo both, or the customer keeps a credit the note no longer grants.
+    // Compensating entries (never deletes), exactly as an invoice cancellation does. Read
+    // after the status transition already committed, so this only ever sees the note's own
+    // original rows, never a concurrent reversal's.
     const ledgerEntries = rules.postsLedger
-      ? await ledgerEntriesForCreditNote(req.business._id, document._id, { session })
+      ? await ledgerEntriesForCreditNote(req.business._id, cancelled._id, { session })
       : [];
 
-    await document.save({ session });
+    if (documentType !== 'credit_note') await cancelled.save({ session });
 
     // A cancelled note no longer credits its source invoice, so the room it claimed goes
     // back — otherwise the invoice could never be credited for that value again.
-    if (documentType === 'credit_note' && document.sourceInvoice) {
-      await releaseCreditOnInvoice(req.business._id, document.sourceInvoice, document.total, { session });
+    if (documentType === 'credit_note' && cancelled.sourceInvoice) {
+      await releaseCreditOnInvoice(req.business._id, cancelled.sourceInvoice, cancelled.total, { session });
     }
 
-    if (ledgerEntries.length) await reverseLedgerEntries(req, document, ledgerEntries, { session });
-    if (rules.postsLedger) await refreshCustomerBalanceForDocument(req, document, { session });
+    if (ledgerEntries.length) await reverseLedgerEntries(req, cancelled, ledgerEntries, { session });
+    if (rules.postsLedger) await refreshCustomerBalanceForDocument(req, cancelled, { session });
 
     await publishDomainEvent(
       {
@@ -373,20 +422,20 @@ export const cancelDocumentWorkflow = ({ req, documentType }) => {
         actor: req.user._id,
         eventType: DOMAIN_EVENTS.documentCancelled,
         aggregateType: 'sales_document',
-        aggregateId: document._id,
+        aggregateId: cancelled._id,
         payload: {
           documentType,
-          documentNumber: document.documentNumber,
-          customerId: document.customer,
-          customerName: document.customerSnapshot?.name,
-          total: document.total
+          documentNumber: cancelled.documentNumber,
+          customerId: cancelled.customer,
+          customerName: cancelled.customerSnapshot?.name,
+          total: cancelled.total
         },
-        dedupeKey: `${DOMAIN_EVENTS.documentCancelled}:${document._id}:cancelled`
+        dedupeKey: `${DOMAIN_EVENTS.documentCancelled}:${cancelled._id}:cancelled`
       },
       { session }
     );
     if (movements.length) await publishStockAdjustedEvents(req, movements, { session });
 
-    return document;
+    return cancelled;
   });
 };

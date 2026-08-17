@@ -52,6 +52,12 @@ const paymentSchema = new mongoose.Schema(
     amount: { type: Number, required: true, min: 0 },
     allocatedAmount: { type: Number, default: 0, min: 0 },
     unappliedAmount: { type: Number, default: 0, min: 0 },
+    // Overpayment that stopped being spendable credit because the invoice it was received
+    // against was cancelled. Moved out of `unappliedAmount` (never deleted) so the money is
+    // represented exactly once: as cash owed back through the refundStatus workflow above,
+    // not simultaneously as credit the customer could still spend. An application reversal
+    // moves it back into `unappliedAmount` through the normal release path.
+    refundableAmount: { type: Number, default: 0, min: 0 },
     currency: { type: String, default: 'INR', trim: true, uppercase: true, maxlength: 3 },
     reference: { type: String, default: '', trim: true, maxlength: 160 },
     notes: { type: String, default: '', trim: true, maxlength: 1000 },

@@ -40,6 +40,20 @@ export const ledgerEntriesForCreditNote = (businessId, documentId, { session } =
     .session(session || null)
     .lean();
 
+// The cash/bank debit a receipt posted when the money arrived. Needed on cancellation of a
+// non-last invoice in a multi-invoice receipt: only that invoice's share of this row may be
+// compensated, since the rest of the receipt still settles bills that stand.
+export const cashDebitEntriesForPayment = (businessId, paymentId, { session } = {}) =>
+  LedgerEntry.find({
+    business: businessId,
+    payment: paymentId,
+    sourceType: 'payment',
+    direction: 'debit',
+    account: { $in: ['cash', 'bank'] }
+  })
+    .session(session || null)
+    .lean();
+
 export const invoiceHasLedgerEntries = (businessId, invoiceId, { session } = {}) =>
   LedgerEntry.exists({ business: businessId, invoice: invoiceId }).session(session || null);
 
@@ -133,6 +147,253 @@ export const releaseCreditOnInvoice = (businessId, invoiceId, amount, { session 
     { $inc: { creditedAmount: -money(amount) } },
     { new: true, session }
   );
+
+/**
+ * Claim settlement capacity on an invoice — the ceiling every settlement shares, whatever
+ * funds it. `total` on an issued invoice is immutable, so the ceiling is known before the
+ * write and the predicate stays a plain comparison.
+ *
+ * This is what makes over-settlement impossible without a transaction. The source counters
+ * above stop the same credit being spent twice; they say nothing about two *different*
+ * sources settling more of one invoice than it is worth. Only this does.
+ *
+ * Cancelled/void invoices are excluded inside the same atomic operation, so a cancellation
+ * racing a settlement cannot be straddled either.
+ */
+export const claimSettlementOnInvoice = async (businessId, invoice, amount, { session } = {}) =>
+  Invoice.findOneAndUpdate(
+    {
+      _id: invoice._id,
+      business: businessId,
+      documentType: 'invoice',
+      documentStatus: { $nin: ['cancelled', 'void'] },
+      settledAmount: { $lte: money(money(invoice.total) - money(amount)) }
+    },
+    { $inc: { settledAmount: money(amount) } },
+    { new: true, session }
+  );
+
+// Hand capacity back when the settlement it was reserved for never landed. Mirror of
+// `claimSettlementOnInvoice`; the floor keeps `settledAmount` from going negative if a
+// compensation is somehow replayed.
+export const releaseSettlementOnInvoice = (businessId, invoiceId, amount, { session } = {}) =>
+  Invoice.findOneAndUpdate(
+    { _id: invoiceId, business: businessId, settledAmount: { $gte: money(amount) } },
+    { $inc: { settledAmount: -money(amount) } },
+    { new: true, session }
+  );
+
+/**
+ * Bring `settledAmount` up to the invoice's live allocation total before a claim is measured
+ * against it.
+ *
+ * `settledAmount` was added after these documents were written, so an existing invoice can
+ * carry no value at all (`{ $lte: n }` does not match a missing field, so every claim on it
+ * would 409 and the invoice would be unusable) or a stale 0 alongside real allocations (the
+ * ceiling would then be measured from the wrong floor, and two concurrent settlements could
+ * both pass). Repairing it here, at the moment it is first relied on, is what makes the guard
+ * correct on existing data without a migration.
+ *
+ * It only ever RAISES the value. Lowering it is exactly the clobber this guard exists to
+ * prevent: a reservation taken by a concurrent workflow is already counted in `settledAmount`
+ * but not yet in the allocation rows, so writing the live total over it would hand the same
+ * capacity out twice. The write is a compare-and-set on the exact value that was read (or on
+ * its absence), so a reservation landing in between makes this a no-op rather than a clobber.
+ */
+export const rehydrateSettlementBaseline = async (businessId, invoiceId, liveSettled, { session } = {}) => {
+  const live = money(liveSettled);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = await Invoice.findOne({ _id: invoiceId, business: businessId })
+      .select('settledAmount')
+      .session(session || null)
+      .lean();
+    if (!current) return null;
+
+    const stored = current.settledAmount;
+    const missing = stored === undefined || stored === null;
+    if (!missing && money(stored) >= live) return current;
+
+    const filter = missing
+      ? { _id: invoiceId, business: businessId, settledAmount: null }
+      : { _id: invoiceId, business: businessId, settledAmount: stored };
+    const updated = await Invoice.findOneAndUpdate(filter, { $set: { settledAmount: live } }, { new: true, session });
+    if (updated) return updated;
+  }
+
+  return null;
+};
+
+/**
+ * The atomic "this invoice is closing" transition.
+ *
+ * Cancellation used to mutate `documentStatus` in memory and persist it only after the whole
+ * reversal sweep had run, so for the entire duration of that sweep MongoDB still said
+ * 'issued' and `claimSettlementOnInvoice` (which excludes cancelled invoices in its own
+ * predicate) let settlements straight through — onto an invoice that was already being
+ * unwound. Committing the transition FIRST, in one compare-and-set, is what closes that
+ * window: after it lands no settlement claim, credit note or dues collection can pass the
+ * status predicate, so the sweep only ever has to deal with work already in flight.
+ *
+ * `null` back means somebody else already cancelled or voided it — the caller's idempotent
+ * no-op case.
+ */
+export const closeInvoiceForCancellation = (businessId, invoiceId, patch, { session } = {}) =>
+  Invoice.findOneAndUpdate(
+    { _id: invoiceId, business: businessId, documentType: 'invoice', documentStatus: { $nin: ['cancelled', 'void'] } },
+    { $set: patch },
+    { new: true, session }
+  );
+
+// Undo the transition above when a guard that can only be evaluated after it (a credit note
+// that was raised in the same instant) turns out to refuse the cancellation.
+export const reopenCancelledInvoice = (businessId, invoiceId, snapshot, { session } = {}) =>
+  Invoice.findOneAndUpdate(
+    { _id: invoiceId, business: businessId, documentStatus: 'cancelled' },
+    { $set: snapshot },
+    { new: true, session }
+  );
+
+/**
+ * The atomic "this credit note is closing" transition (§F-1). Mirrors closeInvoiceForCancellation,
+ * but the "no live application" guard is folded into the same compare-and-set rather than checked
+ * beforehand: the predicate requires `appliedAmount: 0`, the exact counter claimCreditFromNote
+ * claims before it ever writes an allocation. That makes the two orderings resolve correctly
+ * without a transaction:
+ *
+ * - cancel first: this lands, flips documentStatus to 'cancelled'; the application's own
+ *   `documentStatus: 'issued'` predicate then fails it.
+ * - apply first: the claim bumps appliedAmount off zero; this predicate then fails, so
+ *   cancellation never commits against a note an application just claimed.
+ *
+ * `null` back means either race above, or a genuinely live application — the caller
+ * re-reads to tell them apart.
+ */
+export const closeCreditNoteForCancellation = (businessId, creditNoteId, patch, { session } = {}) =>
+  Invoice.findOneAndUpdate(
+    { _id: creditNoteId, business: businessId, documentType: 'credit_note', documentStatus: 'issued', appliedAmount: 0 },
+    { $set: patch },
+    { new: true, session }
+  );
+
+// Undo the transition above — the belt-and-braces case where a live application is somehow
+// found immediately after a successful close. Mirror of reopenCancelledInvoice.
+export const reopenCancelledCreditNote = (businessId, creditNoteId, snapshot, { session } = {}) =>
+  Invoice.findOneAndUpdate(
+    { _id: creditNoteId, business: businessId, documentType: 'credit_note', documentStatus: 'cancelled' },
+    { $set: snapshot },
+    { new: true, session }
+  );
+
+/**
+ * Live cash allocations on this invoice that were written by a receipt recorded against a
+ * DIFFERENT invoice — i.e. the multi-invoice receipt case, where `Payment.invoice` names only
+ * the last invoice of the batch.
+ *
+ * Every other cancellation predicate is keyed on `Payment.invoice`, so without this the money
+ * a shared receipt allocated to a cancelled non-last invoice is flagged by nothing: it stops
+ * settling anything (the customer-balance aggregate excludes cancelled invoices) and is never
+ * recorded as owed back. Returned with the payment so the caller can move exactly that
+ * portion into `refundableAmount` and compensate exactly that much of the cash debit.
+ */
+export const crossInvoiceCashAllocationsForInvoice = async (businessId, invoiceId, { session } = {}) => {
+  const allocations = await SettlementAllocation.find({
+    business: businessId,
+    invoice: invoiceId,
+    source: 'payment',
+    reversedAt: null
+  })
+    .session(session || null)
+    .lean();
+  if (!allocations.length) return [];
+
+  const payments = await Payment.find({ business: businessId, _id: { $in: allocations.map((row) => row.payment) } })
+    .select('invoice method currency customer amount allocatedAmount')
+    .session(session || null)
+    .lean();
+  const byId = new Map(payments.map((payment) => [String(payment._id), payment]));
+
+  return allocations
+    .map((allocation) => ({ allocation, payment: byId.get(String(allocation.payment)) }))
+    .filter(({ payment }) => payment && String(payment.invoice || '') !== String(invoiceId));
+};
+
+// Move the cancelled invoice's share of a shared receipt out of "allocated" and into "owed
+// back as cash", in one operation so the receipt's amount is never split across both.
+export const refundAllocatedCashOnPayment = (businessId, paymentId, amount, { session } = {}) =>
+  Payment.findOneAndUpdate(
+    { _id: paymentId, business: businessId, allocatedAmount: { $gte: money(amount) } },
+    {
+      $inc: { allocatedAmount: -money(amount), refundableAmount: money(amount) },
+      $set: { refundStatus: 'pending' }
+    },
+    { new: true, session }
+  );
+
+// Only to describe a lost claim — the decision was already made by the update above.
+export const settlementRoomForInvoice = async (businessId, invoiceId, { session } = {}) => {
+  const invoice = await Invoice.findOne({ _id: invoiceId, business: businessId })
+    .select('total settledAmount')
+    .session(session || null)
+    .lean();
+  const total = money(invoice?.total);
+  const settled = money(invoice?.settledAmount);
+  return { total, settledAmount: settled, remaining: money(Math.max(total - settled, 0)) };
+};
+
+/**
+ * Cancelling an invoice withdraws the credit its own receipts still hold: the money is owed
+ * back as cash now, so it must stop being spendable credit at the same instant.
+ *
+ * Scoped exactly like `markInvoicePaymentsRefundPending` — same `invoice` field, same receipt
+ * filter — because the `customer_credits` ledger row an overpayment posted hangs off that same
+ * invoice. The two staying in lockstep is what keeps the ledger and `availableCredit` agreeing.
+ *
+ * Returns what was actually withdrawn per payment, so the caller can bound its compensating
+ * ledger entries by it: credit already spent elsewhere was discharged by that application's
+ * own debit and must not be compensated a second time.
+ */
+export const withdrawUnappliedCreditForInvoice = async (businessId, invoiceId, { session } = {}) => {
+  const withdrawn = new Map();
+  const payments = await Payment.find({
+    business: businessId,
+    invoice: invoiceId,
+    type: 'receipt',
+    status: 'completed',
+    refundStatus: { $ne: 'pending' },
+    unappliedAmount: { $gt: 0 }
+  })
+    .select('_id')
+    .session(session || null)
+    .lean();
+
+  for (const payment of payments) {
+    // Compare-and-set on the exact stored value rather than a blind $set to zero: an
+    // application that claimed part of this pool a moment ago must not be withdrawn twice.
+    // Unlike the other claims this one cannot answer "someone else took it" with a 409 —
+    // the cancellation has to finish — so it re-reads and retries a bounded number of times.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await Payment.findOne({ _id: payment._id, business: businessId })
+        .select('unappliedAmount')
+        .session(session || null)
+        .lean();
+      const amount = Number(current?.unappliedAmount) || 0;
+      if (amount <= 0) break;
+
+      const moved = await Payment.findOneAndUpdate(
+        { _id: payment._id, business: businessId, unappliedAmount: amount },
+        { $inc: { unappliedAmount: -amount, refundableAmount: amount } },
+        { new: true, session }
+      );
+      if (moved) {
+        withdrawn.set(String(payment._id), money(amount));
+        break;
+      }
+    }
+  }
+
+  return withdrawn;
+};
 
 // Claim credit off an issued credit note. Ceiling is the note's own immutable total.
 export const claimCreditFromNote = async (businessId, creditNote, amount, { session } = {}) =>
@@ -237,6 +498,15 @@ export const markAllocationReversed = (businessId, allocationId, { actorId, reas
   SettlementAllocation.findOneAndUpdate(
     { _id: allocationId, business: businessId, reversedAt: null },
     { $set: { reversedAt: new Date(), reversedBy: actorId || null, reversalReason: reason || '' } },
+    { new: true, session }
+  );
+
+// Mirror of `markAllocationReversed`, for the one caller that has to undo its own reversal:
+// the cancellation sweep, when the receipt it was about to make refundable refused the write.
+export const restoreAllocation = (businessId, allocationId, { session } = {}) =>
+  SettlementAllocation.findOneAndUpdate(
+    { _id: allocationId, business: businessId, reversedAt: { $ne: null } },
+    { $set: { reversedAt: null, reversedBy: null, reversalReason: '' } },
     { new: true, session }
   );
 

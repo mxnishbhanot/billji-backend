@@ -6,12 +6,15 @@ import { withTransaction } from '../../utils/transaction.js';
 import { reverseLedgerEntries } from '../invoices/service.js';
 import {
   allocationTotalsForInvoice,
+  cashDebitEntriesForPayment,
   claimCreditFromNote,
   claimCreditFromPayment,
+  claimSettlementOnInvoice,
   createLedgerEntries,
   createSettlementAllocation,
   createPaymentRecord,
   creditSourcesForCustomer,
+  crossInvoiceCashAllocationsForInvoice,
   customerBalanceTotals,
   deleteSettlementAllocations,
   findSettlementAllocation,
@@ -21,8 +24,13 @@ import {
   markAllocationReversed,
   markInvoiceRefundProcessed,
   paymentIdsAllocatedToInvoice,
+  refundAllocatedCashOnPayment,
+  rehydrateSettlementBaseline,
   releaseCreditToNote,
   releaseCreditToPayment,
+  releaseSettlementOnInvoice,
+  restoreAllocation,
+  settlementRoomForInvoice,
   updateCustomerBalance
 } from './repository.js';
 
@@ -33,23 +41,55 @@ const accountForMethod = (method) => (['bank_transfer', 'card', 'cheque', 'upi',
 const serializePayment = (payment) => (payment.toObject ? payment.toObject() : payment);
 const serializeAllocation = (allocation) => (allocation.toObject ? allocation.toObject() : allocation);
 
-// Recompute an invoice's paid/balance/status after applying `allocatedAmount` of money
-// on top of what money had already settled it (`paidBefore`).
-//
-// `paidAmount` is cash only; credit that settled this invoice sits in `creditApplied` and
-// is subtracted separately, so an invoice never claims to have been paid with money that
-// never arrived.
-const applyInvoicePayment = (invoice, paidBefore, allocatedAmount, actorId) => {
-  const invoiceTotal = money(invoice.total);
-  const creditApplied = money(invoice.creditApplied);
-  const paidAmount = money(Math.min(paidBefore + allocatedAmount, Math.max(invoiceTotal - creditApplied, 0)));
-  const balanceDue = money(Math.max(invoiceTotal - paidAmount - creditApplied, 0));
-  invoice.paidAmount = paidAmount;
-  invoice.balanceDue = balanceDue;
-  invoice.paymentStatus = balanceDue <= 0 ? 'paid' : paidAmount + creditApplied > 0 ? 'partial' : 'unpaid';
-  invoice.status = legacyStatusFor(invoice);
-  invoice.updatedBy = actorId;
-  return { paidAmount, balanceDue };
+/**
+ * The invoice-side settlement guard, in one place for every path that settles an invoice —
+ * cash, dues collection and credit application alike.
+ *
+ * `claim` reserves capacity with a single compare-and-set before anything is written, so two
+ * concurrent settlements drawing on *different* sources cannot both pass a balance check that
+ * only one of them can honour. Reserving before writing is what makes the guard hold with no
+ * transaction session, which is the case the source-side counters were already built for.
+ *
+ * `release` is the compensation. With a transaction the reservation rolls back with everything
+ * else; without one it has already committed, so it must be handed back explicitly or the
+ * invoice stays permanently short of capacity no settlement ever used. `keep` names the
+ * invoices whose allocation did land — their capacity is genuinely consumed and must stay
+ * reserved. Compensation failures are swallowed so they cannot mask the error that caused
+ * the unwind.
+ *
+ * `settled` is what the caller already read as this invoice's live allocation total. It is
+ * passed in rather than re-derived so the pre-claim rehydration (existing documents written
+ * before `settledAmount` existed) costs no extra query.
+ */
+const invoiceSettlementClaims = (req, session) => {
+  const claims = [];
+
+  return {
+    claim: async (invoice, amount, { code, message, settled = 0 }) => {
+      if (money(amount) <= 0) return;
+
+      // Before the ceiling is measured, make sure the floor is real. On a document that
+      // predates `settledAmount` the claim would otherwise be evaluated against a missing or
+      // stale field — either refusing every settlement outright, or measuring capacity from
+      // zero while live allocations already stand.
+      await rehydrateSettlementBaseline(req.business._id, invoice._id, settled, { session });
+
+      const claimed = await claimSettlementOnInvoice(req.business._id, invoice, amount, { session });
+      if (!claimed) {
+        const room = await settlementRoomForInvoice(req.business._id, invoice._id, { session });
+        throw new ApiError(409, message(room), { code, balanceDue: room.remaining });
+      }
+
+      claims.push({ invoiceId: invoice._id, amount: money(amount) });
+    },
+    release: async ({ keep = new Set() } = {}) => {
+      if (session) return;
+      for (const claim of claims) {
+        if (keep.has(String(claim.invoiceId))) continue;
+        await releaseSettlementOnInvoice(req.business._id, claim.invoiceId, claim.amount).catch(() => null);
+      }
+    }
+  };
 };
 
 const ledgerBase = (req, payment, invoice) => ({
@@ -116,11 +156,7 @@ export const recordInvoicePaymentWorkflow = ({ req }) =>
     const amount = money(req.body.amount);
     if (amount <= 0) throw new ApiError(422, 'Payment amount must be greater than zero');
 
-    const {
-      invoice,
-      totalAllocated,
-      paidAmount: paidBefore
-    } = await paymentBalanceForInvoice(req.business._id, req.params.invoiceId, { session });
+    const { invoice, totalAllocated } = await paymentBalanceForInvoice(req.business._id, req.params.invoiceId, { session });
     if (['cancelled', 'void'].includes(invoice.documentStatus)) {
       throw new ApiError(409, 'Cannot record payment for a cancelled invoice');
     }
@@ -136,55 +172,83 @@ export const recordInvoicePaymentWorkflow = ({ req }) =>
     }
 
     const receivedAt = req.body.receivedAt ? new Date(req.body.receivedAt) : new Date();
-    const payment = await createPaymentRecord({
-      business: req.business._id,
-      customer: customerId,
-      salesDocument: invoice._id,
-      invoice: invoice._id,
-      createdBy: req.user._id,
-      updatedBy: req.user._id,
-      type: req.body.type || 'receipt',
-      method: req.body.method || 'cash',
-      status: 'completed',
-      amount,
-      allocatedAmount,
-      unappliedAmount,
-      currency: req.body.currency || 'INR',
-      reference: req.body.reference || '',
-      notes: req.body.notes || '',
-      receivedAt,
-      provider: req.body.provider || {},
-      statusHistory: [{ status: 'completed', at: receivedAt, note: req.body.notes || 'Payment recorded' }],
-      metadata: req.body.metadata || {}
-    }, { session });
 
+    // Reserve the invoice's capacity before any money is recorded: a receipt that loses this
+    // race must not leave a Payment row behind, and the reservation is what stops a
+    // simultaneous credit application from spending the same headroom.
+    const claims = invoiceSettlementClaims(req, session);
+    await claims.claim(invoice, allocatedAmount, {
+      code: 'PAYMENT_EXCEEDS_BALANCE',
+      message: (room) => `The invoice balance changed — at most ${room.remaining} can still be settled. Reload and try again.`,
+      settled: totalAllocated
+    });
+
+    let payment = null;
     let allocation = null;
-    if (allocatedAmount > 0) {
-      allocation = await createSettlementAllocation({
+    try {
+      payment = await createPaymentRecord({
         business: req.business._id,
-        source: 'payment',
-        payment: payment._id,
+        customer: customerId,
         salesDocument: invoice._id,
         invoice: invoice._id,
-        customer: customerId,
-        amount: allocatedAmount,
-        allocatedAt: receivedAt,
-        createdBy: req.user._id
+        createdBy: req.user._id,
+        updatedBy: req.user._id,
+        type: req.body.type || 'receipt',
+        method: req.body.method || 'cash',
+        status: 'completed',
+        amount,
+        allocatedAmount,
+        unappliedAmount,
+        currency: req.body.currency || 'INR',
+        reference: req.body.reference || '',
+        notes: req.body.notes || '',
+        receivedAt,
+        provider: req.body.provider || {},
+        statusHistory: [{ status: 'completed', at: receivedAt, note: req.body.notes || 'Payment recorded' }],
+        metadata: req.body.metadata || {}
       }, { session });
-    }
 
-    applyInvoicePayment(invoice, paidBefore, allocatedAmount, req.user._id);
-    await invoice.save({ session });
+      if (allocatedAmount > 0) {
+        allocation = await createSettlementAllocation({
+          business: req.business._id,
+          source: 'payment',
+          payment: payment._id,
+          salesDocument: invoice._id,
+          invoice: invoice._id,
+          customer: customerId,
+          amount: allocatedAmount,
+          allocatedAt: receivedAt,
+          createdBy: req.user._id
+        }, { session });
+      }
 
-    const ledgerEntries = [cashDebitEntry(req, payment, invoice, amount, receivedAt)];
-    if (allocatedAmount > 0) {
-      ledgerEntries.push(receivableCreditEntry(req, payment, invoice, allocatedAmount, receivedAt));
-    }
-    if (unappliedAmount > 0) {
-      ledgerEntries.push(customerCreditEntry(req, payment, invoice, unappliedAmount, receivedAt));
-    }
+      // Rewritten from the allocation rows this workflow just wrote, never from the figures
+      // read before them: a stale in-memory total would overwrite a concurrent settlement's
+      // work. `settledAmount` is deliberately NOT touched here — it belongs to the atomic
+      // claim above, and any $set of it would undo another workflow's reservation.
+      settleInvoiceFromTotals(
+        invoice,
+        await allocationTotalsForInvoice(req.business._id, invoice._id, { session }),
+        req.user._id
+      );
+      await invoice.save({ session });
 
-    await createLedgerEntries(ledgerEntries, { session });
+      const ledgerEntries = [cashDebitEntry(req, payment, invoice, amount, receivedAt)];
+      if (allocatedAmount > 0) {
+        ledgerEntries.push(receivableCreditEntry(req, payment, invoice, allocatedAmount, receivedAt));
+      }
+      if (unappliedAmount > 0) {
+        ledgerEntries.push(customerCreditEntry(req, payment, invoice, unappliedAmount, receivedAt));
+      }
+
+      await createLedgerEntries(ledgerEntries, { session });
+    } catch (error) {
+      // Hand the capacity back only if the allocation it was reserved for never landed. Once
+      // that row exists the capacity is genuinely consumed, and releasing it would let the
+      // invoice be over-settled later.
+      if (!allocation) await claims.release();
+      throw error;
+    }
 
     let customerBalance = null;
     if (customerId) {
@@ -281,7 +345,7 @@ export const recordCustomerPaymentWorkflow = ({ req }) =>
     // Load + validate every target invoice (server is source of truth for balances).
     const targets = [];
     for (const invoiceId of invoiceIds) {
-      const { invoice, totalAllocated, paidAmount: paidBefore } = await paymentBalanceForInvoice(req.business._id, invoiceId, { session });
+      const { invoice, totalAllocated } = await paymentBalanceForInvoice(req.business._id, invoiceId, { session });
       if (['cancelled', 'void'].includes(invoice.documentStatus)) {
         throw new ApiError(409, `Cannot record payment for cancelled invoice ${invoice.invoiceNumber}`);
       }
@@ -289,7 +353,7 @@ export const recordCustomerPaymentWorkflow = ({ req }) =>
         throw new ApiError(422, `Invoice ${invoice.invoiceNumber} does not belong to this customer`);
       }
       const balance = money(Math.max(money(invoice.total) - money(totalAllocated), 0));
-      targets.push({ invoice, totalAllocated, paidBefore, balance, allocatedAmount: 0 });
+      targets.push({ invoice, totalAllocated, balance, allocatedAmount: 0 });
     }
 
     // Greedy fill in the order received.
@@ -319,56 +383,91 @@ export const recordCustomerPaymentWorkflow = ({ req }) =>
     const lastInvoice = targets[targets.length - 1].invoice;
     const receivedAt = req.body.receivedAt ? new Date(req.body.receivedAt) : new Date();
 
-    const payment = await createPaymentRecord({
-      business: req.business._id,
-      customer: customerRef,
-      salesDocument: lastInvoice._id,
-      invoice: lastInvoice._id,
-      createdBy: req.user._id,
-      updatedBy: req.user._id,
-      type: req.body.type || 'receipt',
-      method: req.body.method || 'cash',
-      status: 'completed',
-      amount,
-      allocatedAmount: allocatedTotal,
-      unappliedAmount,
-      currency: req.body.currency || 'INR',
-      reference: req.body.reference || '',
-      notes: req.body.notes || '',
-      receivedAt,
-      provider: req.body.provider || {},
-      statusHistory: [{ status: 'completed', at: receivedAt, note: req.body.notes || 'Payment recorded' }],
-      metadata: req.body.metadata || {}
-    }, { session });
-
+    // Same reservation as the single-invoice path, one per invoice this receipt settles.
+    // Taken before the Payment row so a lost race leaves no money recorded, and taken for
+    // every target up front so the whole settlement is all-or-nothing.
+    const claims = invoiceSettlementClaims(req, session);
     const allocations = [];
-    const ledgerEntries = [cashDebitEntry(req, payment, lastInvoice, amount, receivedAt)];
 
-    for (const target of targets) {
-      if (target.allocatedAmount <= 0) continue;
-      const allocation = await createSettlementAllocation({
+    try {
+      for (const target of targets) {
+        await claims.claim(target.invoice, target.allocatedAmount, {
+          code: 'PAYMENT_EXCEEDS_BALANCE',
+          message: (room) =>
+            `The balance of invoice ${target.invoice.invoiceNumber} changed — at most ${room.remaining} can still be settled. Reload and try again.`,
+          settled: target.totalAllocated
+        });
+      }
+    } catch (error) {
+      await claims.release();
+      throw error;
+    }
+
+    let payment = null;
+    try {
+      payment = await createPaymentRecord({
         business: req.business._id,
-        source: 'payment',
-        payment: payment._id,
-        salesDocument: target.invoice._id,
-        invoice: target.invoice._id,
         customer: customerRef,
-        amount: target.allocatedAmount,
-        allocatedAt: receivedAt,
-        createdBy: req.user._id
+        salesDocument: lastInvoice._id,
+        invoice: lastInvoice._id,
+        createdBy: req.user._id,
+        updatedBy: req.user._id,
+        type: req.body.type || 'receipt',
+        method: req.body.method || 'cash',
+        status: 'completed',
+        amount,
+        allocatedAmount: allocatedTotal,
+        unappliedAmount,
+        currency: req.body.currency || 'INR',
+        reference: req.body.reference || '',
+        notes: req.body.notes || '',
+        receivedAt,
+        provider: req.body.provider || {},
+        statusHistory: [{ status: 'completed', at: receivedAt, note: req.body.notes || 'Payment recorded' }],
+        metadata: req.body.metadata || {}
       }, { session });
-      allocations.push(allocation);
 
-      applyInvoicePayment(target.invoice, target.paidBefore, target.allocatedAmount, req.user._id);
-      await target.invoice.save({ session });
-      ledgerEntries.push(receivableCreditEntry(req, payment, target.invoice, target.allocatedAmount, receivedAt));
+      const ledgerEntries = [cashDebitEntry(req, payment, lastInvoice, amount, receivedAt)];
+
+      for (const target of targets) {
+        if (target.allocatedAmount <= 0) continue;
+        const allocation = await createSettlementAllocation({
+          business: req.business._id,
+          source: 'payment',
+          payment: payment._id,
+          salesDocument: target.invoice._id,
+          invoice: target.invoice._id,
+          customer: customerRef,
+          amount: target.allocatedAmount,
+          allocatedAt: receivedAt,
+          createdBy: req.user._id
+        }, { session });
+        allocations.push(allocation);
+
+        // Same rule as the single-invoice path: derived from the rows on disk, and never a
+        // $set of `settledAmount` over another workflow's reservation.
+        settleInvoiceFromTotals(
+          target.invoice,
+          await allocationTotalsForInvoice(req.business._id, target.invoice._id, { session }),
+          req.user._id
+        );
+        await target.invoice.save({ session });
+        ledgerEntries.push(receivableCreditEntry(req, payment, target.invoice, target.allocatedAmount, receivedAt));
+      }
+
+      if (unappliedAmount > 0) {
+        ledgerEntries.push(customerCreditEntry(req, payment, lastInvoice, unappliedAmount, receivedAt));
+      }
+
+      await createLedgerEntries(ledgerEntries, { session });
+    } catch (error) {
+      // Hand back only the reservations whose allocation never landed. A partial failure
+      // part-way down the loop would otherwise leave the untouched invoices permanently short
+      // of capacity, or — the other way round — release capacity an existing allocation is
+      // already using.
+      await claims.release({ keep: new Set(allocations.map((allocation) => String(allocation.invoice))) });
+      throw error;
     }
-
-    if (unappliedAmount > 0) {
-      ledgerEntries.push(customerCreditEntry(req, payment, lastInvoice, unappliedAmount, receivedAt));
-    }
-
-    await createLedgerEntries(ledgerEntries, { session });
 
     let customerBalance = null;
     if (customerRef) {
@@ -405,9 +504,16 @@ export const recordCustomerPaymentWorkflow = ({ req }) =>
     return { payment, allocations, invoices: targets.map((target) => target.invoice), customerBalance };
   });
 
-// Rewrite an invoice's settlement fields from the authoritative allocation totals. The
-// credit paths change several allocation rows at once, so they recompute from the sums
-// rather than folding one delta at a time like `applyInvoicePayment` does.
+/**
+ * Rewrite an invoice's derived settlement fields from the authoritative allocation totals.
+ *
+ * `settledAmount` is NOT among them, deliberately. That field is the reservation counter and
+ * is only ever moved by the atomic `$inc` of a claim or a release, because a `$set` computed
+ * from totals read at any other instant can overwrite a reservation another workflow took
+ * between the read and the write — precisely the over-settlement the claim exists to stop.
+ * `paidAmount` / `creditApplied` / `balanceDue` are presentation of the same truth and are
+ * safe to recompute; `settledAmount` is the truth itself.
+ */
 const settleInvoiceFromTotals = (invoice, totals, actorId) => {
   const paidAmount = money(totals.paidAmount);
   const creditApplied = money(totals.creditApplied);
@@ -484,7 +590,7 @@ export const applyCreditWorkflow = ({ req }) =>
     const amount = money(req.body.amount);
     if (amount <= 0) throw new ApiError(422, 'Credit amount must be greater than zero');
 
-    const { invoice, balanceDue } = await paymentBalanceForInvoice(req.business._id, req.params.invoiceId, { session });
+    const { invoice, balanceDue, totalAllocated } = await paymentBalanceForInvoice(req.business._id, req.params.invoiceId, { session });
     if (['cancelled', 'void'].includes(invoice.documentStatus)) {
       throw new ApiError(409, 'Cannot apply credit to a cancelled invoice');
     }
@@ -523,8 +629,18 @@ export const applyCreditWorkflow = ({ req }) =>
     const allocations = [];
     const ledgerEntries = [];
     const appliedAt = new Date();
+    const invoiceClaims = invoiceSettlementClaims(req, session);
 
     try {
+      // The invoice-side reservation, taken once for the whole application. The balance check
+      // above reads a snapshot; this is what holds when two applications drawing on DIFFERENT
+      // sources reach the same invoice at once — neither source counter can see the other.
+      await invoiceClaims.claim(invoice, amount, {
+        code: 'CREDIT_EXCEEDS_BALANCE',
+        message: (room) => `Amount exceeds the invoice balance of ${room.remaining}`,
+        settled: totalAllocated
+      });
+
       for (const item of plan) {
         // Claim before writing anything: the compare-and-set is what makes two concurrent
         // applies of the same credit resolve to one winner and one 409.
@@ -562,6 +678,8 @@ export const applyCreditWorkflow = ({ req }) =>
     } catch (error) {
       // Without a session there is no rollback, so undo by hand: give every claim back and
       // drop the rows already written. Compensation failures must not mask the real error.
+      // Every allocation this workflow wrote is deleted here, so the invoice reservation is
+      // always handed back too — unlike the cash paths, nothing settled survives the unwind.
       if (!session) {
         if (allocations.length) {
           await deleteSettlementAllocations(allocations.map((allocation) => allocation._id)).catch(() => null);
@@ -573,6 +691,7 @@ export const applyCreditWorkflow = ({ req }) =>
           ).catch(() => null);
         }
       }
+      await invoiceClaims.release();
       throw error;
     }
 
@@ -607,6 +726,11 @@ const reverseOneApplication = async (req, invoice, allocation, entries, { sessio
       : await releaseCreditToPayment(req.business._id, allocation.payment, allocation.amount, { session });
   if (!released) throw new ApiError(409, 'The credit source could not be restored', { code: 'CREDIT_RELEASE_FAILED' });
 
+  // The allocation no longer settles the invoice, so the capacity it reserved goes back.
+  // `settledAmount` is only ever moved by a claim or a release, so this is the only place a
+  // reversal can keep it equal to the live allocation total.
+  await releaseSettlementOnInvoice(req.business._id, invoice._id, allocation.amount, { session });
+
   await reverseLedgerEntries(req, invoice, entries, { session, note: 'credit application reversed' });
   return reversed;
 };
@@ -637,6 +761,80 @@ export const reverseCreditApplicationsForInvoice = async (req, invoice, { sessio
   }
 
   return reversedCount;
+};
+
+/**
+ * Cancelling an invoice also has to deal with cash that reached it through a receipt recorded
+ * against a DIFFERENT invoice — the multi-invoice receipt, where `Payment.invoice` names only
+ * the last bill of the batch.
+ *
+ * Every other cancellation step is keyed on `Payment.invoice`, so for a non-last invoice none
+ * of them fire: the allocation stops settling anything (the customer-balance aggregate skips
+ * cancelled invoices) and nothing records that the money is owed back. It is neither settling,
+ * nor spendable, nor refundable — it is simply lost, and the ledger ends up short by exactly
+ * that amount.
+ *
+ * The rule applied here is the one the single-invoice cancellation already follows, restricted
+ * to this invoice's share: the money stops settling (`reversedAt`), the reservation it held is
+ * released, it moves out of `allocatedAmount` into `refundableAmount` on the receipt with
+ * `refundStatus: 'pending'`, and exactly that much of the receipt's cash debit is compensated.
+ * It becomes refundable cash and nothing else — never spendable credit as well, since
+ * `refundableAmount` is excluded from the credit pool by construction.
+ *
+ * Allocations written by a credit APPLICATION are not touched: they carry a stamped ledger
+ * pair and are unwound by `reverseCreditApplicationsForInvoice`, which runs first.
+ */
+export const refundCrossInvoiceAllocationsForInvoice = async (req, invoice, { session } = {}) => {
+  const rows = await crossInvoiceCashAllocationsForInvoice(req.business._id, invoice._id, { session });
+  const refunded = [];
+
+  for (const { allocation, payment } of rows) {
+    // A stamped pair means this is a credit application funded by an overpayment, not cash
+    // that arrived against this invoice. Those are reversed by the credit sweep.
+    const stamped = await ledgerEntriesForAllocation(req.business._id, allocation._id, { session });
+    if (stamped.length) continue;
+
+    const reversed = await markAllocationReversed(req.business._id, allocation._id, {
+      actorId: req.user._id,
+      reason: `Invoice ${invoice.invoiceNumber || invoice.documentNumber} cancelled`,
+      session
+    });
+    if (!reversed) continue;
+
+    await releaseSettlementOnInvoice(req.business._id, invoice._id, allocation.amount, { session });
+
+    const moved = await refundAllocatedCashOnPayment(req.business._id, payment._id, allocation.amount, { session });
+    if (!moved) {
+      // The money must never be neither settling nor refundable. Without a session the two
+      // writes above have already committed, so put them back before giving up: the
+      // allocation goes live again and the capacity it holds is re-reserved.
+      if (!session) {
+        await restoreAllocation(req.business._id, allocation._id).catch(() => null);
+        await claimSettlementOnInvoice(req.business._id, invoice, allocation.amount).catch(() => null);
+      }
+      throw new ApiError(409, 'The receipt could not be marked refundable', { code: 'REFUND_MARK_FAILED' });
+    }
+
+    // Compensate only this invoice's share of the cash debit — the rest of the receipt still
+    // settles invoices that stand.
+    const debits = await cashDebitEntriesForPayment(req.business._id, payment._id, { session });
+    let outstanding = money(allocation.amount);
+    const compensated = [];
+    for (const entry of debits) {
+      if (outstanding <= 0) break;
+      const amount = money(Math.min(money(entry.amount), outstanding));
+      if (amount <= 0) continue;
+      outstanding = money(outstanding - amount);
+      compensated.push(amount === money(entry.amount) ? entry : { ...entry, amount });
+    }
+    if (compensated.length) {
+      await reverseLedgerEntries(req, invoice, compensated, { session, note: 'cancelled' });
+    }
+
+    refunded.push({ paymentId: payment._id, amount: money(allocation.amount) });
+  }
+
+  return refunded;
 };
 
 // Undo one credit application: flag the allocation reversed, hand the amount back to the
