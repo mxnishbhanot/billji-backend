@@ -129,7 +129,34 @@ Invoice numbering uses `NumberSequence` per business, document type, and financi
 
 ## Deploy
 
-Railway setup:
+Render setup (current target):
+
+The repository root holds a `render.yaml` Blueprint, so the service can be created
+from it directly (New > Blueprint) or configured by hand with the same values:
+
+- Service type: Web Service (Node runtime, no Docker).
+- Root directory: repository root.
+- Build command: `npm ci --omit=dev`
+- Start command: `npm start`
+- Node version: `24.19.0` (also pinned in `.node-version`).
+- Health check path: `/health`
+- WebSockets: Socket.IO runs on the same web service; Render supports it with no
+  extra configuration.
+
+Render-specific environment variables:
+
+- `PUPPETEER_CACHE_DIR=/opt/render/project/src/.cache/puppeteer` — required.
+  Render carries only the project directory from the build container into the
+  runtime container, so Chromium downloaded into the default `~/.cache/puppeteer`
+  would be missing at launch.
+- `PORT` is injected by Render; do not set it.
+- `API_PUBLIC_URL` must be set to the Render service URL.
+- `CORS_ORIGINS` must keep listing every client origin already allowed on Railway.
+
+Everything else comes from `.env.example`. The server writes nothing to disk, so no
+Render disk is needed.
+
+Railway setup (kept as the rollback target):
 
 1. Create a Railway service from this `backend` folder.
 2. Set start command to `npm start`.
