@@ -1,0 +1,76 @@
+# Render Blueprint for the BillJi / QuickInvoice API.
+#
+# Nothing here changes application behavior: same Express app, same routes, same
+# MongoDB, same Puppeteer PDF path. It only describes where the process runs.
+#
+# Secrets are declared with `sync: false`, which makes Render prompt for the value
+# in the dashboard instead of reading it from this file. No secret is committed.
+services:
+  - type: web
+    name: billji-api
+    runtime: node
+    plan: starter # Chromium needs more than the free plan's 512 MB while rendering.
+    region: singapore
+    branch: main
+    # Repository root is the backend itself, so no root directory override.
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: NODE_ENV
+        value: production
+      # Render only carries the repository directory from build to runtime; the
+      # default Puppeteer cache (~/.cache/puppeteer) is dropped, and Chromium is
+      # then missing at launch. Pointing the cache inside the project directory
+      # keeps the Chromium that `npm ci` downloads.
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/project/src/.cache/puppeteer
+
+      # --- Set these in the Render dashboard (copy the values from Railway) ---
+      - key: MONGODB_URI # existing Atlas cluster — do not create a new database
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRES_IN
+        sync: false
+      - key: REFRESH_TOKEN_SECRET
+        sync: false
+      - key: REFRESH_TOKEN_EXPIRES_IN
+        sync: false
+      - key: TWO_FACTOR_ENC_KEY
+        sync: false
+      - key: CLIENT_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: API_PUBLIC_URL # set to the Render URL once the service exists
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_IDS
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_PUBLIC_BASE_URL
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: BILLING_ENFORCEMENT
+        sync: false
