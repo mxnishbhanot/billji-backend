@@ -57,7 +57,7 @@ export const DEFAULT_INVOICE_NOTES = 'Thank you for your business!';
 const resolveTemplate = (business = {}) => {
   const tpl = business.invoiceTemplate || {};
   return {
-    accentColor: /^#[0-9a-fA-F]{6}$/.test(tpl.accentColor || '') ? tpl.accentColor : '#4338CA',
+    accentColor: /^#[0-9a-fA-F]{6}$/.test(tpl.accentColor || '') ? tpl.accentColor : '#D95F18',
     showLogo: tpl.showLogo !== false,
     showNotes: tpl.showNotes !== false,
     showSignature: tpl.showSignature === true,
