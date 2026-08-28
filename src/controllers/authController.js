@@ -39,7 +39,7 @@ const businessProfile = (business) => ({
     compoundTax: business?.taxSettings?.compoundTax ?? false
   },
   invoiceTemplate: {
-    accentColor: business?.invoiceTemplate?.accentColor || '#4338CA',
+    accentColor: business?.invoiceTemplate?.accentColor || '#D95F18',
     showLogo: business?.invoiceTemplate?.showLogo ?? true,
     showNotes: business?.invoiceTemplate?.showNotes ?? true,
     showSignature: business?.invoiceTemplate?.showSignature ?? false,
@@ -540,7 +540,7 @@ export const updateSettings = asyncHandler(async (req, res) => {
 
   if (req.body.invoiceTemplate && typeof req.body.invoiceTemplate === 'object') {
     const tpl = req.body.invoiceTemplate;
-    if (tpl.accentColor !== undefined) req.business.invoiceTemplate.accentColor = String(tpl.accentColor) || '#4338CA';
+    if (tpl.accentColor !== undefined) req.business.invoiceTemplate.accentColor = String(tpl.accentColor) || '#D95F18';
     if (tpl.showLogo !== undefined) req.business.invoiceTemplate.showLogo = Boolean(tpl.showLogo);
     if (tpl.showNotes !== undefined) req.business.invoiceTemplate.showNotes = Boolean(tpl.showNotes);
     if (tpl.showSignature !== undefined) req.business.invoiceTemplate.showSignature = Boolean(tpl.showSignature);

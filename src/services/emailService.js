@@ -337,7 +337,7 @@ export const sendDataExportReadyEmail = async ({ to, name, business, downloadUrl
     subject: `Your ${business?.businessName || 'BillJi'} data export is ready`,
     html: `<p>Hi ${escapeHtml(name || 'there')},</p>
 <p>The data export you requested for <strong>${brand}</strong> is ready. It contains your customers, products, invoices, orders, payments and ledger as spreadsheets (CSV) and raw JSON.</p>
-<p><a href="${downloadUrl}" style="display:inline-block;padding:12px 20px;background:#4338CA;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold;">Download export (${sizeMb} MB)</a></p>
+<p><a href="${downloadUrl}" style="display:inline-block;padding:12px 20px;background:#9B4000;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold;">Download export (${sizeMb} MB)</a></p>
 <p>This link works until <strong>${expiresOn}</strong>, then the archive is deleted. You can request a fresh export from Settings at any time.</p>
 <p>Anyone with this link can download your full business record, so don't forward it.</p>`,
     text: `Hi ${name || 'there'}, your ${business?.businessName || 'BillJi'} data export is ready (${sizeMb} MB). Download it here: ${downloadUrl} . The link works until ${expiresOn}, then the archive is deleted. Anyone with this link can download your full business record, so don't forward it.`

@@ -33,7 +33,7 @@ const businessSchema = new mongoose.Schema(
       compoundTax: { type: Boolean, default: false }
     },
     invoiceTemplate: {
-      accentColor: { type: String, default: '#4338CA', trim: true, maxlength: 9 },
+      accentColor: { type: String, default: '#D95F18', trim: true, maxlength: 9 },
       showLogo: { type: Boolean, default: true },
       showNotes: { type: Boolean, default: true },
       showSignature: { type: Boolean, default: false },
