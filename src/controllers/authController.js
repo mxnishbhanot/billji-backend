@@ -14,6 +14,7 @@ import { sendPasswordResetEmail } from '../services/emailService.js';
 import { currentSubscription } from '../modules/billing/service.js';
 import { MAX_DOCUMENT_PREFIX_LENGTH } from '../services/numberingService.js';
 import { createBusinessForOwner } from '../services/businessService.js';
+import { applyReferral } from '../modules/referrals/service.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { refreshTokenExpiresAt, signAccessToken, signChallengeToken, signRefreshToken, tokenHash, verifyRefreshToken } from '../utils/jwt.js';
@@ -159,7 +160,8 @@ const respondWithSessionOr2fa = async ({ req, res, user, business, statusCode = 
 export const registerRules = [
   body('name').trim().notEmpty().withMessage('Name is required').isLength({ max: 80 }),
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail(EMAIL_NORMALIZE),
-  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  body('referralCode').optional({ checkFalsy: true }).trim().isLength({ min: 4, max: 40 })
 ];
 
 export const loginRules = [
@@ -251,6 +253,31 @@ export const settingsRules = [
   body('invoiceTemplate.notes').optional({ nullable: true }).isString().isLength({ max: 1000 }).withMessage('Notes must be 1000 characters or fewer')
 ];
 
+/**
+ * Applies a referral code sent with a signup, and never fails the signup over it.
+ *
+ * The account is the thing the user asked for; the code is a bonus. A wrong code, a race, or a
+ * referral service that is briefly unhappy must all still produce a working account — so this
+ * reports what happened instead of throwing, and the client re-queues the retryable cases through
+ * the outbox (see features/referrals/reconcile).
+ */
+const attachSignupReferral = async ({ business, code }) => {
+  if (!code) return null;
+  try {
+    await applyReferral({ business, code });
+    return { applied: true, code: String(code).trim().toUpperCase(), reason: null };
+  } catch (error) {
+    return {
+      applied: false,
+      code: String(code).trim().toUpperCase(),
+      // A permanent code (bad code, self-referral, already used) tells the client to stop retrying;
+      // anything else is transient and worth re-queueing.
+      reason: error?.details?.code || 'REFERRAL_APPLY_FAILED',
+      message: error?.message || 'Referral code could not be applied'
+    };
+  }
+};
+
 export const register = asyncHandler(async (req, res) => {
   const { name, email, password } = req.body;
   const exists = await User.findOne({ email });
@@ -270,7 +297,7 @@ export const register = asyncHandler(async (req, res) => {
 
   const session = await sessionResponse({ req, user, business });
   void logAudit(req, { action: 'auth.registered', resourceType: 'user', resourceId: user._id });
-  res.status(201).json(session);
+  res.status(201).json({ ...session, referral: await attachSignupReferral({ business, code: req.body.referralCode }) });
 });
 
 export const login = asyncHandler(async (req, res) => {

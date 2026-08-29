@@ -7,6 +7,7 @@ import { ApiError } from '../utils/ApiError.js';
 import { logAudit } from './auditService.js';
 import { discountFor, findApplicableCoupon, redeemCoupon, releaseCoupon, timeGrant } from './couponService.js';
 import { nextPlatformSequence } from './numberingService.js';
+import { convertReferral } from '../modules/referrals/service.js';
 import { DEFAULT_PROVIDER, getAutopayProvider, getProvider } from './payments/index.js';
 import { applyPlan, cancelSubscription, ensureSubscription, getSubscription, resolveStatus } from './subscriptionService.js';
 
@@ -624,6 +625,14 @@ export const applyCapturedPayment = async ({ claimed, actor = { type: 'system' }
       }).catch((error) => console.error('[billing] coupon redemption failed after payment:', error.message));
     }
   }
+
+  // The referrer's free month, if this business joined on someone's code. Every capture path
+  // (webhook, client verify, reconciliation) funnels through here, so this is the one place it can
+  // be hooked without being hooked three times. Never fatal: money is already captured, and a
+  // reward that fails to apply must not take the activation down with it.
+  await convertReferral({ business: claimed.business, now }).catch((error) =>
+    console.error('[billing] referral conversion failed after payment:', error.message)
+  );
 
   return { payment: claimed, subscription, alreadyApplied: false };
 };

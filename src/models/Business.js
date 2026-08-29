@@ -6,6 +6,10 @@ const businessSchema = new mongoose.Schema(
     owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     businessName: { type: String, required: true, trim: true, maxlength: 120 },
     logoUrl: { type: String, default: '' },
+    // This business's own referral code, minted on first read (see referrals/service.js) rather
+    // than at creation: most businesses never open the referral screen, and a code nobody has
+    // seen is not worth a unique-index slot.
+    referralCode: { type: String, default: '', trim: true, uppercase: true, maxlength: 40 },
     gstNumber: { type: String, default: '', trim: true, uppercase: true, maxlength: 32 },
     phone: { type: String, default: '', trim: true, maxlength: 24 },
     countryCode: { type: String, default: '+91', trim: true, maxlength: 8 },
@@ -81,6 +85,9 @@ businessSchema.pre('validate', function syncStateCode(next) {
 });
 
 businessSchema.index({ owner: 1, businessName: 1 });
+// Partial rather than sparse: the field defaults to '', so a sparse index would still try to make
+// every code-less business unique on the same empty string.
+businessSchema.index({ referralCode: 1 }, { unique: true, partialFilterExpression: { referralCode: { $gt: '' } } });
 
 const Business = mongoose.model('Business', businessSchema);
 
