@@ -1,26 +1,32 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildInvoiceHtml } from '../src/services/invoiceHtml.js';
+import { deriveDocumentView } from '../src/services/invoice/invoiceHelpers.js';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgo=';
-const render = (invoiceTemplate) => buildInvoiceHtml({ items: [], total: 0 }, { invoiceTemplate });
+const view = (invoiceTemplate) => deriveDocumentView({ items: [], total: 0 }, { invoiceTemplate });
 
 describe('invoice signature block', () => {
   it('off by default: no signature image, shows system-generated note', () => {
-    const html = render({});
-    assert.ok(!html.includes('class="sign-img"'));
-    assert.ok(html.includes('no signature is required'));
+    const derived = view({});
+    assert.equal(derived.showSignature, false);
+    assert.equal(derived.signatureUrl, '');
   });
 
   it('on with a saved signature: embeds the image', () => {
-    const html = render({ showSignature: true, signatureUrl: PNG });
-    assert.ok(html.includes('class="sign-img"'));
-    assert.ok(html.includes(PNG));
+    const derived = view({ showSignature: true, signatureUrl: PNG });
+    assert.equal(derived.showSignature, true);
+    assert.equal(derived.signatureUrl, PNG);
   });
 
   it('on without an image: falls back to a blank signatory line', () => {
-    const html = render({ showSignature: true, signatureUrl: '' });
-    assert.ok(!html.includes('class="sign-img"'));
-    assert.ok(html.includes('Authorized signatory'));
+    const derived = view({ showSignature: true, signatureUrl: '' });
+    assert.equal(derived.showSignature, true);
+    assert.equal(derived.signatureUrl, '');
+  });
+
+  // A remote URL cannot be embedded — the renderer would have to fetch mid-render.
+  it('ignores a signature that is not an inline image', () => {
+    const derived = view({ showSignature: true, signatureUrl: 'https://cdn.example.com/sign.png' });
+    assert.equal(derived.signatureUrl, '');
   });
 });

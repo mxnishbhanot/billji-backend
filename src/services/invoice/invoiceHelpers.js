@@ -1,6 +1,5 @@
-// Every value a rendered invoice needs, derived once and shared by both renderers:
-// the React PDF document (InvoiceDocument.js) and the HTML preview (invoiceHtml.js).
-// Nothing here calculates money — totals, GST, discounts and the tax summary all
+// Every value a rendered invoice needs, derived once for the React PDF document
+// (InvoiceDocument.js). Nothing here calculates money — totals, GST, discounts and the tax summary all
 // arrive already computed by utils/invoiceMath.js. This module only decides what
 // gets printed and how it reads.
 
