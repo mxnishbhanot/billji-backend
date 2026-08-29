@@ -1,7 +1,7 @@
 # Render Blueprint for the BillJi / QuickInvoice API.
 #
 # Nothing here changes application behavior: same Express app, same routes, same
-# MongoDB, same Puppeteer PDF path. It only describes where the process runs.
+# MongoDB, same PDF path. It only describes where the process runs.
 #
 # Secrets are declared with `sync: false`, which makes Render prompt for the value
 # in the dashboard instead of reading it from this file. No secret is committed.
@@ -9,14 +9,11 @@ services:
   - type: web
     name: billji-api
     runtime: node
-    plan: starter # Chromium needs more than the free plan's 512 MB while rendering.
+    plan: free # No browser to host any more: PDFs render in-process with React PDF.
     region: singapore
     branch: main
     # Repository root is the backend itself, so no root directory override.
-    # `npx puppeteer browsers install chrome` is repeated deliberately: when Render
-    # reuses a build cache it can skip the install that would have downloaded
-    # Chromium, and the command is a no-op once the binary is already in place.
-    buildCommand: npm ci --omit=dev && npx puppeteer browsers install chrome
+    buildCommand: npm ci --omit=dev
     startCommand: npm start
     healthCheckPath: /health
     autoDeploy: true
@@ -25,12 +22,6 @@ services:
         value: 24.19.0
       - key: NODE_ENV
         value: production
-      # Render only carries the repository directory from build to runtime; the
-      # default Puppeteer cache (~/.cache/puppeteer) is dropped, and Chromium is
-      # then missing at launch. Pointing the cache inside the project directory
-      # keeps the Chromium that `npm ci` downloads.
-      - key: PUPPETEER_CACHE_DIR
-        value: /opt/render/project/src/.cache/puppeteer
 
       # --- Set these in the Render dashboard (copy the values from Railway) ---
       - key: MONGODB_URI # existing Atlas cluster — do not create a new database

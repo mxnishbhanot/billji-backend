@@ -19,7 +19,6 @@ import { DOCUMENT_KINDS } from '../modules/documents/documentTypes.js';
 import { DEFAULT_REMINDER_TEMPLATE, listPendingReminders, sendReminders } from '../services/reminderService.js';
 import { sendInvoiceEmail } from '../services/emailService.js';
 import { buildInvoiceHtml } from '../services/invoiceHtml.js';
-import { generateInvoicePdf } from '../services/pdfService.js';
 import { getOrRenderInvoicePdf } from '../services/invoicePdfCache.js';
 import { DOMAIN_EVENTS, publishDomainEvent } from '../services/eventBus.js';
 import { emitBusinessEvent } from '../services/socketService.js';

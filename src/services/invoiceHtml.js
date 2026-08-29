@@ -1,6 +1,10 @@
-// Single source of truth for invoice rendering. The same HTML is used to produce
-// the PDF (headless Chromium in pdfService) and the live mobile preview (WebView
-// fetches it via the template-preview endpoint), so both are pixel-identical.
+// HTML rendering of an invoice, used by the live mobile preview: the app fetches it
+// from the preview endpoints and shows it in a WebView. The PDF is rendered separately
+// by services/invoice (React PDF). Both consume the same derived view from
+// services/invoice/invoiceHelpers.js, so what a document says can never differ between
+// the two — only how it is drawn.
+
+import { deriveDocumentView } from './invoice/invoiceHelpers.js';
 
 const escapeHtml = (value) =>
   String(value ?? '')
@@ -10,171 +14,20 @@ const escapeHtml = (value) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
-const currency = (value) => `Rs. ${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-const formatDate = (value) => {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-};
-
-const statusText = (value = '') => String(value || '').replace(/_/g, ' ').toUpperCase();
-
-const joinLines = (lines = []) => lines.filter(Boolean).map((line) => String(line).trim()).filter(Boolean);
-
-const businessAddress = (business = {}) =>
-  joinLines([business.address, joinLines([business.city, business.state, business.pinCode]).join(', '), business.website]);
-
-const customerAddress = (customer = {}) => {
-  const billing = customer.billingAddress || {};
-  const structured = joinLines([billing.line1, billing.line2, joinLines([billing.city, billing.state, billing.pinCode]).join(', ')]);
-  return structured.length ? structured : joinLines([customer.address]);
-};
-
-const customerTaxLabel = (customer = {}) => {
-  if (customer.gstNumber || customer.taxIdentifiers?.gstNumber) return `GSTIN: ${customer.gstNumber || customer.taxIdentifiers.gstNumber}`;
-  if (customer.taxIdentifiers?.panNumber) return `PAN: ${customer.taxIdentifiers.panNumber}`;
-  return '';
-};
-
-const hexToRgb = (hex) => {
-  const match = /^#?([0-9a-f]{6})$/i.exec(hex || '');
-  const n = match ? parseInt(match[1], 16) : 0x4338ca;
-  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
-};
-const tint = (hex, ratio) => {
-  const { r, g, b } = hexToRgb(hex);
-  const mix = (c) => Math.round(c + (255 - c) * ratio);
-  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
-};
-
-// Shown under NOTES & TERMS when the business hasn't set its own default notes
-// and the invoice itself carries none. Exported so the app can pre-fill the
-// settings field with the same copy.
-export const DEFAULT_INVOICE_NOTES = 'Thank you for your business!';
-
-const resolveTemplate = (business = {}) => {
-  const tpl = business.invoiceTemplate || {};
-  return {
-    accentColor: /^#[0-9a-fA-F]{6}$/.test(tpl.accentColor || '') ? tpl.accentColor : '#4338CA',
-    showLogo: tpl.showLogo !== false,
-    showNotes: tpl.showNotes !== false,
-    showSignature: tpl.showSignature === true,
-    signatureUrl: typeof tpl.signatureUrl === 'string' ? tpl.signatureUrl : '',
-    showPaymentRows: tpl.showPaymentRows !== false,
-    notes: typeof tpl.notes === 'string' ? tpl.notes.trim() : ''
-  };
-};
-
-const isLogoData = (logoUrl = '') => /^data:image\/(?:png|jpe?g);base64,/i.test(logoUrl);
-
-// Per-document identity. A quotation or challan must never be mistaken for the tax
-// invoice — buyers routinely forward a quote internally for approval, so it carries a
-// diagonal watermark and an explicit "not a tax invoice" line as well as its own title.
-const DOCUMENT_META = {
-  invoice: { title: 'INVOICE', noun: 'invoice' },
-  quotation: {
-    title: 'QUOTATION',
-    noun: 'quotation',
-    watermark: 'QUOTATION',
-    disclaimer:
-      'This is a quotation, not a tax invoice or a bill. No goods or services have been supplied and no payment is due against this document. A tax invoice will be issued separately once this quotation is approved and the order is placed. Prices and availability are subject to change until then.'
-  },
-  delivery_challan: {
-    title: 'DELIVERY CHALLAN',
-    noun: 'delivery challan',
-    watermark: 'CHALLAN',
-    disclaimer:
-      'This is a delivery challan, not a tax invoice or a bill. It accompanies the goods listed above; the amounts shown are for reference only. A tax invoice will be issued separately for payment.'
-  },
-  credit_note: { title: 'CREDIT NOTE', noun: 'credit note' }
-};
-
-const metaFor = (documentType) => DOCUMENT_META[documentType] || DOCUMENT_META.invoice;
-
 const partyBlock = (label, lead, lines) => `
   <div class="party">
     <div class="party-label">${escapeHtml(label)}</div>
     <div class="party-name">${escapeHtml(lead)}</div>
-    ${joinLines(lines).map((line) => `<div class="party-text">${escapeHtml(line)}</div>`).join('')}
+    ${lines.map((line) => `<div class="party-text">${escapeHtml(line)}</div>`).join('')}
   </div>`;
 
 export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {}) => {
-  const business = businessContext?.businessProfile || businessContext || {};
-  const tpl = resolveTemplate(business);
-  const accent = tpl.accentColor;
-  const customer = invoice.customerSnapshot || {};
-  const doc = metaFor(invoice.documentType || options.documentType);
-  // Paid / balance / payment status only mean something on a tax invoice. Printing them
-  // on a quotation reads as money already owed.
-  const showPaymentRows = tpl.showPaymentRows && doc.noun === 'invoice';
+  const view = deriveDocumentView(invoice, businessContext, options);
+  const accent = view.accent;
 
-  // paymentStatus is authoritative: a 'paid' invoice always renders fully paid and
-  // 'unpaid' renders zero, even if the denormalized paidAmount/balanceDue are stale
-  // or missing. Only 'partial' trusts the stored amount.
-  const invoiceTotal = Number(invoice.total || 0);
-  const paymentStatus = invoice.paymentStatus;
-  // Credit settles the invoice without money arriving, so a fully-settled invoice is not
-  // necessarily fully *paid*: 'paid' means total - creditApplied was received, not total.
-  // Printing the credit as cash would put a figure on the customer's copy that ties to no
-  // receipt at all.
-  const creditApplied = paymentStatus === 'unpaid' ? 0 : Number(invoice.creditApplied ?? 0);
-  const paidAmount =
-    paymentStatus === 'paid' ? Math.max(invoiceTotal - creditApplied, 0)
-    : paymentStatus === 'unpaid' ? 0
-    : Number(invoice.paidAmount ?? 0);
-  const balanceDue =
-    paymentStatus === 'paid' ? 0
-    : Number(invoice.balanceDue ?? Math.max(invoiceTotal - paidAmount - creditApplied, 0));
-  const discountAmount = Number(invoice.discount?.amount || 0);
-  const taxAmount = Number(invoice.tax?.amount || 0);
-  const taxRate = Number(invoice.tax?.rate || 0);
+  const logoHtml = view.logoUrl ? `<img class="logo" src="${view.logoUrl}" alt="logo" />` : '';
 
-  // GST-aware rendering only when the document carries a tax summary. Invoices issued
-  // before the GST engine have none and keep the exact layout they were printed with.
-  const taxSummary = Array.isArray(invoice.taxSummary) ? invoice.taxSummary : [];
-  const isGstDocument = taxSummary.length > 0;
-  const isInterState = invoice.supplyType === 'inter';
-  const showHsnColumn = isGstDocument && taxSummary.some((row) => row.hsn);
-  const cgstTotal = taxSummary.reduce((sum, row) => sum + Number(row.cgst || 0), 0);
-  const sgstTotal = taxSummary.reduce((sum, row) => sum + Number(row.sgst || 0), 0);
-  const igstTotal = taxSummary.reduce((sum, row) => sum + Number(row.igst || 0), 0);
-
-  const logoHtml = tpl.showLogo && isLogoData(business.logoUrl)
-    ? `<img class="logo" src="${business.logoUrl}" alt="logo" />`
-    : '';
-
-  // Due date is rarely set in-app, so it printed a meaningless "On receipt" on most
-  // receipts. When there's no real due date, show the amount paid instead — concrete
-  // info the customer can use.
-  const dueDateText = formatDate(invoice.dueDate);
-  const validUntilText = formatDate(invoice.validUntil);
-  const metaCells = [['Issue date', formatDate(invoice.date) || '-']];
-
-  if (doc.noun === 'invoice') {
-    metaCells.push(dueDateText ? ['Due date', dueDateText] : ['Amount paid', currency(paidAmount)]);
-    metaCells.push(['Payment', statusText(invoice.paymentStatus || invoice.status || 'unpaid')]);
-    if (showPaymentRows) metaCells.push(['Balance', currency(balanceDue)]);
-  } else {
-    if (validUntilText) metaCells.push(['Valid until', validUntilText]);
-    metaCells.push(['Document', doc.title]);
-  }
-
-  const fromLines = [
-    joinLines([business.phone, business.email]).join('  |  '),
-    ...businessAddress(business),
-    business.gstNumber ? `GSTIN: ${business.gstNumber}` : '',
-    business.panNumber ? `PAN: ${business.panNumber}` : '',
-    // Place of supply belongs on the buyer-facing document; showing it beside the
-    // supplier block keeps the meta row from overflowing on narrow A4 margins.
-    isGstDocument && invoice.placeOfSupply?.state
-      ? `Place of supply: ${invoice.placeOfSupply.state}${isInterState ? ' (inter-state)' : ''}`
-      : ''
-  ];
-  const toLines = [joinLines([customer.phone, customer.email]).join('  |  '), ...customerAddress(customer), customerTaxLabel(customer)];
-
-  const itemsHtml = (invoice.items || [])
+  const itemsHtml = view.items
     .map(
       (item) => `
       <tr>
@@ -182,88 +35,53 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
           <div class="item-name">${escapeHtml(item.name)}</div>
           ${item.sku ? `<div class="item-sku">SKU: ${escapeHtml(item.sku)}</div>` : ''}
         </td>
-        ${showHsnColumn ? `<td class="c-hsn">${escapeHtml(item.hsn || '-')}</td>` : ''}
-        <td class="c-qty">${escapeHtml(item.unit ? `${item.quantity} ${item.unit}` : item.quantity)}</td>
-        <td class="c-rate">${currency(item.price)}</td>
-        ${isGstDocument ? `<td class="c-gst">${Number(item.taxRate || 0)}%</td>` : ''}
-        <td class="c-amt">${currency(item.total)}</td>
+        ${item.hsn === null ? '' : `<td class="c-hsn">${escapeHtml(item.hsn)}</td>`}
+        <td class="c-qty">${escapeHtml(item.quantity)}</td>
+        <td class="c-rate">${escapeHtml(item.rate)}</td>
+        ${item.gst === null ? '' : `<td class="c-gst">${escapeHtml(item.gst)}</td>`}
+        <td class="c-amt">${escapeHtml(item.amount)}</td>
       </tr>`
     )
     .join('');
 
-  // HSN-wise tax breakup — required on a GST invoice and the same grouping GSTR-1 files.
-  const taxSummaryHtml = isGstDocument
+  const taxSummaryHtml = view.isGstDocument
     ? `
     <div class="tax-summary">
-      <div class="party-label">TAX SUMMARY${invoice.placeOfSupply?.state ? ` &middot; PLACE OF SUPPLY: ${escapeHtml(invoice.placeOfSupply.state)}` : ''}</div>
+      <div class="party-label">TAX SUMMARY${view.placeOfSupplyState ? ` &middot; PLACE OF SUPPLY: ${escapeHtml(view.placeOfSupplyState)}` : ''}</div>
       <table class="tax-table">
         <thead>
-          <tr>
-            <th>${showHsnColumn ? 'HSN/SAC' : 'Rate'}</th>
-            ${showHsnColumn ? '<th>Rate</th>' : ''}
-            <th>Taxable</th>
-            ${isInterState ? '<th>IGST</th>' : '<th>CGST</th><th>SGST</th>'}
-            <th>Total tax</th>
-          </tr>
+          <tr>${view.taxSummaryHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr>
         </thead>
         <tbody>
-          ${taxSummary
-            .map(
-              (row) => `
-            <tr>
-              <td>${showHsnColumn ? escapeHtml(row.hsn || '-') : `${Number(row.rate || 0)}%`}</td>
-              ${showHsnColumn ? `<td>${Number(row.rate || 0)}%</td>` : ''}
-              <td>${currency(row.taxableValue)}</td>
-              ${isInterState ? `<td>${currency(row.igst)}</td>` : `<td>${currency(row.cgst)}</td><td>${currency(row.sgst)}</td>`}
-              <td>${currency(row.taxAmount)}</td>
-            </tr>`
-            )
-            .join('')}
+          ${view.taxSummaryRows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}
         </tbody>
       </table>
     </div>`
     : '';
 
-  const totalRows = [`<div class="t-row"><span>Subtotal</span><span>${currency(invoice.subtotal)}</span></div>`];
-  if (discountAmount > 0) totalRows.push(`<div class="t-row"><span>Discount</span><span>-${currency(discountAmount)}</span></div>`);
-  if (isGstDocument) {
-    // A GST invoice must show the tax heads separately, never one merged "Tax" line.
-    if (isInterState) {
-      if (igstTotal > 0) totalRows.push(`<div class="t-row"><span>IGST</span><span>${currency(igstTotal)}</span></div>`);
-    } else {
-      if (cgstTotal > 0) totalRows.push(`<div class="t-row"><span>CGST</span><span>${currency(cgstTotal)}</span></div>`);
-      if (sgstTotal > 0) totalRows.push(`<div class="t-row"><span>SGST</span><span>${currency(sgstTotal)}</span></div>`);
-    }
-  } else if (taxAmount > 0 || taxRate > 0) {
-    totalRows.push(`<div class="t-row"><span>Tax (${taxRate}%)</span><span>${currency(taxAmount)}</span></div>`);
-  }
-  totalRows.push(`<div class="t-row t-total"><span>Total</span><span>${currency(invoice.total)}</span></div>`);
-  if (showPaymentRows) totalRows.push(`<div class="t-row"><span>Paid</span><span>${currency(paidAmount)}</span></div>`);
-  if (showPaymentRows && creditApplied > 0) {
-    totalRows.push(`<div class="t-row"><span>Credit applied</span><span>${currency(creditApplied)}</span></div>`);
-  }
+  const totalRows = view.totalRows
+    .map(
+      (row) =>
+        `<div class="t-row${row.emphasis ? ' t-total' : ''}"><span>${escapeHtml(row.label)}</span><span>${escapeHtml(row.value)}</span></div>`
+    )
+    .join('');
 
-  const balanceHtml = showPaymentRows
-    ? `<div class="t-balance"><span>Balance due</span><span>${currency(balanceDue)}</span></div>`
+  const balanceHtml = view.balanceRow
+    ? `<div class="t-balance"><span>${escapeHtml(view.balanceRow.label)}</span><span>${escapeHtml(view.balanceRow.value)}</span></div>`
     : '';
 
-  // Per-invoice notes win; else the business's saved default; else the built-in copy.
-  const notes = (invoice.notes && invoice.notes.trim()) || tpl.notes || DEFAULT_INVOICE_NOTES;
-  // With the signature block on, leave room for a handwritten signatory line.
-  // With it off, state that the invoice is system-generated so the empty space
-  // reads as intentional and professional instead of a missing signature.
-  const signImg = tpl.showSignature && isLogoData(tpl.signatureUrl)
-    ? `<img class="sign-img" src="${tpl.signatureUrl}" alt="signature" />`
+  const signImg = view.signatureUrl
+    ? `<img class="sign-img" src="${view.signatureUrl}" alt="signature" />`
     : '<div class="sign-line"></div>';
-  const signBlock = tpl.showSignature
+  const signBlock = view.showSignature
     ? `<div class="sign">${signImg}<div class="sign-text">Authorized signatory</div></div>`
-    : `<div class="sign sign-auto"><div class="sign-note">This is an electronically generated ${escapeHtml(doc.noun)};<br/>no signature is required.</div></div>`;
-  const disclaimerHtml = doc.disclaimer
-    ? `<div class="disclaimer"><span class="disclaimer-tag">NOT A TAX INVOICE</span>${escapeHtml(doc.disclaimer)}</div>`
+    : `<div class="sign sign-auto"><div class="sign-note">This is an electronically generated ${escapeHtml(view.doc.noun)};<br/>no signature is required.</div></div>`;
+  const disclaimerHtml = view.doc.disclaimer
+    ? `<div class="disclaimer"><span class="disclaimer-tag">NOT A TAX INVOICE</span>${escapeHtml(view.doc.disclaimer)}</div>`
     : '';
-  const watermarkHtml = doc.watermark ? `<div class="watermark">${escapeHtml(doc.watermark)}</div>` : '';
+  const watermarkHtml = view.doc.watermark ? `<div class="watermark">${escapeHtml(view.doc.watermark)}</div>` : '';
   const footerInner = `
-    ${tpl.showNotes ? `<div class="notes"><div class="party-label">NOTES &amp; TERMS</div><div class="notes-text">${escapeHtml(notes)}</div></div>` : '<div class="notes"></div>'}
+    ${view.showNotes ? `<div class="notes"><div class="party-label">NOTES &amp; TERMS</div><div class="notes-text">${escapeHtml(view.notes)}</div></div>` : '<div class="notes"></div>'}
     ${signBlock}
   `;
 
@@ -273,7 +91,7 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=794, initial-scale=1, maximum-scale=1" />
 <style>
-  :root { --accent: ${accent}; --accent-tint: ${tint(accent, 0.9)}; }
+  :root { --accent: ${accent}; --accent-tint: ${view.accentTint}; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { background: #ffffff; }
   body {
@@ -385,35 +203,35 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
     <div class="header">
       <div class="header-left">
         ${logoHtml}
-        <div class="title">${escapeHtml(doc.title)}</div>
+        <div class="title">${escapeHtml(view.doc.title)}</div>
       </div>
-      <div class="number">${escapeHtml(invoice.invoiceNumber || invoice.documentNumber || '-')}</div>
+      <div class="number">${escapeHtml(view.documentNumber)}</div>
     </div>
     <div class="rule"></div>
 
     <div class="meta">
-      ${metaCells
+      ${view.metaCells
         .map(
           ([label, value], i) =>
-            `<div class="meta-cell${showPaymentRows && i === metaCells.length - 1 ? ' accent' : ''}"><div class="meta-label">${escapeHtml(label.toUpperCase())}</div><div class="meta-value">${escapeHtml(value)}</div></div>`
+            `<div class="meta-cell${view.showPaymentRows && i === view.metaCells.length - 1 ? ' accent' : ''}"><div class="meta-label">${escapeHtml(label.toUpperCase())}</div><div class="meta-value">${escapeHtml(value)}</div></div>`
         )
         .join('')}
     </div>
     <div class="rule"></div>
 
     <div class="parties">
-      ${partyBlock('FROM', business.businessName || 'Your Business', fromLines)}
-      ${partyBlock('BILL TO', customer.name || 'Customer', toLines)}
+      ${partyBlock('FROM', view.businessName, view.fromLines)}
+      ${partyBlock('BILL TO', view.customerName, view.toLines)}
     </div>
 
     <table>
       <thead>
-        <tr><th>Description</th>${showHsnColumn ? '<th>HSN/SAC</th>' : ''}<th>Qty</th><th>Rate</th>${isGstDocument ? '<th>GST</th>' : ''}<th>Amount</th></tr>
+        <tr>${view.itemHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr>
       </thead>
       <tbody>${itemsHtml}</tbody>
     </table>
 
-    <div class="totals"><div class="totals-box">${totalRows.join('')}${balanceHtml}</div></div>
+    <div class="totals"><div class="totals-box">${totalRows}${balanceHtml}</div></div>
 
     ${taxSummaryHtml}
 
@@ -431,5 +249,3 @@ export const buildInvoiceHtml = (invoice = {}, businessContext = {}, options = {
 </body>
 </html>`;
 };
-
-export { resolveTemplate };
