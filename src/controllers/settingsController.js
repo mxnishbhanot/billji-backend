@@ -1,6 +1,6 @@
 import { settingsRules, updateSettings } from './authController.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import { buildInvoiceHtml } from '../services/invoiceHtml.js';
+import { generateInvoicePdf } from '../services/invoice/pdfService.js';
 
 export { settingsRules, updateSettings };
 
@@ -37,12 +37,12 @@ const SAMPLE_INVOICE = {
   notes: ''
 };
 
-// Returns the live invoice HTML (same template the PDF uses) for the mobile WebView
-// preview. The body carries the in-progress, unsaved template so toggling updates instantly.
+// Returns the live invoice as a base64 PDF for the mobile preview. The body carries the
+// in-progress, unsaved template so toggling updates instantly.
 export const invoiceTemplatePreview = asyncHandler(async (req, res) => {
   const business = typeof req.business?.toObject === 'function' ? req.business.toObject() : { ...(req.business || {}) };
   business.invoiceTemplate = { ...(business.invoiceTemplate || {}), ...(req.body || {}) };
 
-  const html = buildInvoiceHtml(SAMPLE_INVOICE, business, { mode: 'screen' });
-  res.type('html').send(html);
+  const pdf = await generateInvoicePdf(SAMPLE_INVOICE, business);
+  res.type('text/plain').send(pdf.toString('base64'));
 });

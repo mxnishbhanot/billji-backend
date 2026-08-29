@@ -136,7 +136,7 @@ from it directly (New > Blueprint) or configured by hand with the same values:
 
 - Service type: Web Service (Node runtime, no Docker).
 - Root directory: repository root.
-- Build command: `npm ci --omit=dev && npx puppeteer browsers install chrome`
+- Build command: `npm ci --omit=dev`
 - Start command: `npm start`
 - Node version: `24.19.0` (also pinned in `.node-version`).
 - Health check path: `/health`
@@ -145,12 +145,6 @@ from it directly (New > Blueprint) or configured by hand with the same values:
 
 Render-specific environment variables:
 
-- `PUPPETEER_CACHE_DIR=/opt/render/project/src/.cache/puppeteer` — required.
-  Render carries only the project directory from the build container into the
-  runtime container, so Chromium downloaded into the default `~/.cache/puppeteer`
-  would be missing at launch. Without it, `GET /invoices/:id/pdf` fails with
-  `Could not find Chrome ... your cache path is incorrectly configured (which is:
-  /opt/render/.cache/puppeteer)` while every other route keeps working.
 - `PORT` is injected by Render; do not set it.
 - `API_PUBLIC_URL` must be set to the Render service URL.
 - `CORS_ORIGINS` must keep listing every client origin already allowed on Railway.

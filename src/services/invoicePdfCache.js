@@ -1,4 +1,4 @@
-import { generateInvoicePdf } from './pdfService.js';
+import { generateInvoicePdf } from './invoice/pdfService.js';
 import {
   isR2Enabled,
   getObjectBuffer,
@@ -9,12 +9,17 @@ import {
   getPublicObjectUrl
 } from './r2Service.js';
 
-// Caches rendered invoice PDFs in R2 to skip the expensive puppeteer render on
-// repeat views/downloads/emails. The cache key embeds a version stamp derived
+// Caches rendered invoice PDFs in R2 to skip re-rendering on repeat
+// views/downloads/emails. The cache key embeds a version stamp derived
 // from the invoice's updatedAt, so any edit (which bumps updatedAt on save)
 // produces a new key and the next request renders fresh. Stale objects are
 // cleaned up via invalidateInvoicePdf(); an R2 lifecycle rule can serve as a
 // backstop for any orphans.
+
+// Bumped whenever the renderer changes the look of the page. Without it, objects
+// cached by the previous renderer keep being served until each invoice happens to be
+// edited, and the same business sees two different layouts.
+const RENDERER_VERSION = 'v2';
 
 const versionStamp = (invoice) => {
   const ts = invoice.updatedAt ? new Date(invoice.updatedAt).getTime() : 0;
@@ -22,7 +27,7 @@ const versionStamp = (invoice) => {
 };
 
 export const invoicePdfCacheKey = (invoice) =>
-  `invoices/${invoice.business}/${invoice._id}-${versionStamp(invoice)}.pdf`;
+  `invoices/${invoice.business}/${invoice._id}-${versionStamp(invoice)}-${RENDERER_VERSION}.pdf`;
 
 // Best-effort persistence of the current cache key onto the document so we can
 // later delete the exact object on invalidate. Never throws into the caller.

@@ -6,7 +6,6 @@ import { bootstrapRbac } from './bootstrap/rbac.js';
 import { connectDB } from './config/db.js';
 import { env } from './config/env.js';
 import { startOutboxDispatcher } from './services/eventDispatcher.js';
-import { closePdfBrowser } from './services/pdfService.js';
 import { startScheduler } from './services/scheduler.js';
 import { initSocket } from './services/socketService.js';
 
@@ -25,15 +24,13 @@ const startServer = async () => {
       console.log(`QuickInvoice API running on port ${env.port}`);
     });
 
-    // Shut down the shared headless-Chromium instance with the process so it does
-    // not linger after a restart. Guarded so a double signal can't run twice.
+    // Guarded so a double signal can't run the shutdown twice.
     let shuttingDown = false;
     const shutdown = async (signal) => {
       if (shuttingDown) return;
       shuttingDown = true;
       console.log(`Received ${signal}, shutting down...`);
       server.close();
-      await closePdfBrowser();
       process.exit(0);
     };
     process.on('SIGTERM', () => shutdown('SIGTERM'));

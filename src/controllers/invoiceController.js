@@ -18,8 +18,7 @@ import {
 import { DOCUMENT_KINDS } from '../modules/documents/documentTypes.js';
 import { DEFAULT_REMINDER_TEMPLATE, listPendingReminders, sendReminders } from '../services/reminderService.js';
 import { sendInvoiceEmail } from '../services/emailService.js';
-import { buildInvoiceHtml } from '../services/invoiceHtml.js';
-import { generateInvoicePdf } from '../services/pdfService.js';
+import { generateInvoicePdf } from '../services/invoice/pdfService.js';
 import { getOrRenderInvoicePdf } from '../services/invoicePdfCache.js';
 import { DOMAIN_EVENTS, publishDomainEvent } from '../services/eventBus.js';
 import { emitBusinessEvent } from '../services/socketService.js';
@@ -188,8 +187,11 @@ export const previewInvoice = asyncHandler(async (req, res) => {
     notes: req.body.notes || ''
   };
 
-  const html = buildInvoiceHtml(previewInvoiceData, req.business, { mode: 'screen' });
-  res.type('html').send(html);
+  // The preview *is* the PDF the customer will receive, not a look-alike of it, so there
+  // is one layout to maintain. Base64 over text/plain keeps the client's response handling
+  // unchanged and survives the JSON-free transport the mobile viewer expects.
+  const pdf = await generateInvoicePdf(previewInvoiceData, req.business);
+  res.type('text/plain').send(pdf.toString('base64'));
 });
 
 export const getInvoice = asyncHandler(async (req, res) => {

@@ -6,6 +6,7 @@ import Invoice from '../../models/Invoice.js';
 import Order from '../../models/Order.js';
 import Payment from '../../models/Payment.js';
 import Product from '../../models/Product.js';
+import Referral from '../../models/Referral.js';
 import PurchaseBill from '../../models/PurchaseBill.js';
 import Vendor from '../../models/Vendor.js';
 import {
@@ -23,6 +24,7 @@ import {
 } from '../../controllers/productController.js';
 import { createExpense, deleteExpense, expenseRules, updateExpense } from '../expenses/controller.js';
 import { createOrder } from '../orders/controller.js';
+import { apply as applyReferral, applyReferralRules } from '../referrals/controller.js';
 import { orderRules } from '../orders/schema.js';
 import { recordCustomerPayment, recordInvoicePayment } from '../payments/controller.js';
 import {
@@ -227,6 +229,16 @@ export const PUSH_OPERATIONS = {
     model: Payment,
     resultKey: 'payment',
     params: (op) => ({ invoiceId: op.payload?.invoiceId })
+  },
+  // A referral code typed while offline. No `feature`: the programme that sells the paid plans is
+  // not itself gated on one. Idempotent server-side on (business), so a replay is a no-op rather
+  // than a second free month.
+  'referral:create': {
+    permission: PERMISSIONS.billingSubscriptionChange,
+    rules: applyReferralRules,
+    handler: applyReferral,
+    model: Referral,
+    resultKey: 'referral'
   },
   'customerPayment:create': {
     permission: PERMISSIONS.paymentsRecord,
