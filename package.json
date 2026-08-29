@@ -11,7 +11,8 @@
     "seed": "node src/seed/index.js",
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.js\"",
     "test:watch": "node --watch --test --test-concurrency=1 \"tests/**/*.test.js\"",
-    "test:coverage": "c8 node --test --test-concurrency=1 \"tests/**/*.test.js\""
+    "test:coverage": "c8 node --test --test-concurrency=1 \"tests/**/*.test.js\"",
+    "db:reset": "node scripts/reset-dev-db.mjs && npm run seed"
   },
   "keywords": [
     "invoice",
